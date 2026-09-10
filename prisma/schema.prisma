@@ -1,0 +1,786 @@
+// Prisma schema — single migration authority for the whole predictsim database.
+// core-service (NestJS) owns auth/RBAC/ledger-admin/support.
+// prediction-service (Go) reads/writes Game/Round/Prediction and TokenLedgerEntry
+// directly via pgx against these same tables, without its own migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Accounts & hierarchy
+// ---------------------------------------------------------------------------
+
+enum AccountType {
+  PLATFORM_ADMIN
+  ADMIN
+  AGENT
+  PLAYER
+
+  // Internal delegate accounts. Never own a subtree of their own — they act
+  // entirely via held Roles, scoped to whoever created them (createdById).
+  // ADMIN_STAFF is created by an ADMIN; AGENT_STAFF is created by an AGENT.
+  ADMIN_STAFF
+  AGENT_STAFF
+
+  @@map("account_type")
+}
+
+model User {
+  id           String      @id @default(uuid())
+  email        String      @unique
+  username     String      @unique
+  passwordHash String      @map("password_hash")
+  accountType  AccountType @map("account_type")
+  isActive     Boolean     @default(true) @map("is_active")
+
+  // Who created this account. Platform Admin creates Admins; Admins create
+  // Agents and Players. Agents and Players never create accounts.
+  createdById String? @map("created_by_id")
+  createdBy   User?   @relation("AccountCreator", fields: [createdById], references: [id])
+  created     User[]  @relation("AccountCreator")
+
+  // Player -> Agent assignment. Fixed at creation to whichever Agent created
+  // the Player — never chosen by an Admin, never reassigned afterward. Only
+  // meaningful when accountType = PLAYER.
+  agentId String? @map("agent_id")
+  agent   User?   @relation("AgentAssignment", fields: [agentId], references: [id])
+  players User[]  @relation("AgentAssignment")
+
+  // Set when this account was disabled only as a side effect of an ancestor
+  // being disabled, recording which ancestor. Re-enabling that ancestor
+  // re-enables exactly the rows it took down — an account disabled on its own
+  // merits keeps this null and stays disabled. Deliberately a plain column
+  // rather than a third self-relation: it's a marker for undo, not an edge
+  // anyone navigates.
+  deactivatedByCascadeFrom String? @map("deactivated_by_cascade_from")
+
+  // Cached balances, always updated in the same DB transaction as the
+  // TokenLedgerEntry that changes them. Source of truth is the ledger;
+  // these columns exist so reads don't have to sum the ledger every time.
+  //
+  // Two wallets, only meaningful together on a PLAYER:
+  //   balance         — the spendable wallet. Funded by an Admin mint or an
+  //                     Agent transfer; on an AGENT it also collects the
+  //                     stakes its Players place.
+  //   winningsBalance — where settlement pays winners. Also spendable, but
+  //                     second in line: placing a bet draws down `balance`
+  //                     first and only dips into winnings once that's dry.
+  // Both are zero and unused on PLATFORM_ADMIN and the staff tiers.
+  balance         Int @default(0)
+  winningsBalance Int @default(0) @map("winnings_balance")
+
+  // Profit/loss allocation across the hierarchy, in tenths (see
+  // PROFIT_SHARE_TOTAL). Purely a simulation accounting split — it decides
+  // how a round's computed result is attributed in the token ledger, and
+  // never corresponds to money owed between real people.
+  //
+  // On an ADMIN: the Agent slice applied to Agents it creates (default 1,
+  // i.e. a 9:1 Admin:Agent split). On an AGENT: this Agent's own slice.
+  // Null on tiers where the concept doesn't apply.
+  defaultAgentShare Int? @map("default_agent_share")
+  agentShare        Int? @map("agent_share")
+
+  rates Rate[] @relation("RateOwner")
+
+  roles           UserRole[]
+  sessions        Session[]
+  ledgerEntries   TokenLedgerEntry[] @relation("LedgerOwner")
+  grantsPerformed TokenLedgerEntry[] @relation("LedgerPerformedBy")
+  predictions     Prediction[]
+  gamesCreated    Game[]
+  gameEnablements GameEnablement[]
+  supportMessages SupportMessage[]
+
+  // Admin<->Agent settlement records this account appears in. Both sides
+  // read the same row from opposite ends — see the Settlement model.
+  settlementsAsAgent Settlement[] @relation("SettlementAgent")
+  settlementsAsAdmin Settlement[] @relation("SettlementAdmin")
+
+  resultCorrections ResultCorrection[] @relation("ResultCorrectionAuthor")
+
+  tokenRequests          TokenRequest[] @relation("TokenRequestRequester")
+  tokenRequestsClaimed   TokenRequest[] @relation("TokenRequestClaimant")
+  tokenRequestsResolved  TokenRequest[] @relation("TokenRequestResolver")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([accountType])
+  @@index([agentId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — many-to-many roles/permissions
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  users       UserRole[]
+  permissions RolePermission[]
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  description String?
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id")
+  permissionId String     @map("permission_id")
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId     String   @map("user_id")
+  roleId     String   @map("role_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// Rate cards — inherited payout configuration
+// ---------------------------------------------------------------------------
+
+// The bet shapes a round can be played in. Payout multipliers are configured
+// per owner via Rate below; these are simulation payout tiers, and a token
+// has no monetary value at any point (see ARCHITECTURE.md safety boundaries).
+enum BetType {
+  SINGLE
+  JODI
+  SINGLE_PANA
+  DOUBLE_PANA
+  TRIPLE_PANA
+  HALF_SANGAM
+  FULL_SANGAM
+
+  @@map("bet_type")
+}
+
+// Which card a Rate row belongs to. An Admin holds one DEFAULT card that acts
+// as the template for Agents it creates. An Agent holds two: GIVEN (what its
+// Admin assigned it — the Agent cannot edit this) and GIVING (what it passes
+// to its own Players, seeded equal to GIVEN and editable downward).
+enum RateKind {
+  DEFAULT
+  GIVEN
+  GIVING
+  // A Player's own override card, owned by the Player itself. Optional: most
+  // Players have none of these rows and simply read their Agent's current
+  // GIVING card live at request time (see RatesService.myCards) — this only
+  // exists for the Player an Agent explicitly priced differently at
+  // creation. Capped by the Agent's GIVING card, same invariant that already
+  // bounds GIVING under GIVEN.
+  PLAYING
+
+  @@map("rate_kind")
+}
+
+model Rate {
+  id      String   @id @default(uuid())
+  ownerId String   @map("owner_id")
+  owner   User     @relation("RateOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  kind    RateKind
+  betType BetType  @map("bet_type")
+
+  // Payout multiplier, e.g. 9 => a winning SINGLE returns 9x the stake.
+  // Integer on purpose: every real multiplier in this domain is a whole
+  // number, and float drift has no place anywhere near ledger arithmetic.
+  multiplier Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // One multiplier per bet type per card — the card *is* this set of rows.
+  @@unique([ownerId, kind, betType])
+  @@index([ownerId, kind])
+  @@map("rates")
+}
+
+// ---------------------------------------------------------------------------
+// Token ledger — append-only, single source of truth for every balance change
+// ---------------------------------------------------------------------------
+
+// Where a balance change came from. ADMIN_GRANT is the only source a person
+// can mint through, and only an Admin may use it — that is the boundary
+// worth enforcing, and it is gated separately from the move-only path
+// (LedgerService.assertCanFund vs assertCanTransfer).
+//
+// Total supply is deliberately NOT constant: PREDICTION_DEBIT destroys the
+// stake with no counterparty, and PREDICTION_PAYOUT creates the winnings
+// from nothing. AGENT_TRANSFER is the only source that conserves, as a
+// paired ±sum of zero. See ARCHITECTURE.md "wallets no longer conserve" —
+// an earlier version of this comment claimed the opposite.
+enum LedgerSource {
+  ADMIN_GRANT
+  // An Agent moving its own tokens to or from one of its Players. Always
+  // written as a pair of rows (source negative, destination positive) in a
+  // single transaction — an Agent cannot create tokens, only pass along
+  // ones it already holds. Added 2026-08-05.
+  AGENT_TRANSFER
+  PREDICTION_DEBIT
+  // LEGACY — no longer written. Briefly (2026-08-05) a stake was credited to
+  // the Agent's wallet; that was reversed the same day by explicit
+  // instruction ("goes nowhere, just subtracting from his acc"). The value
+  // stays because Postgres cannot drop an enum member safely, and dropping
+  // it would also invalidate any historical row. Nothing produces it now —
+  // the Admin<->Agent position lives in `settlements` instead.
+  PREDICTION_STAKE_IN
+  PREDICTION_PAYOUT
+
+  // Undoing a PREDICTION_PAYOUT because the result it was graded against was
+  // wrong. Written as its own compensating row rather than by editing or
+  // deleting the original: the ledger is append-only, and "this was paid,
+  // then clawed back after a correction" is a different fact from "this was
+  // never paid". Uniquely among every source here, it is allowed to drive a
+  // balance negative — a Player may already have staked winnings that are
+  // being taken back, and refusing would leave the ledger describing a
+  // payout the corrected result says never happened. See
+  // ResultsService.correctResult.
+  RESULT_CORRECTION
+
+  // A Player giving up tokens, executed by an Admin. Destroys supply: the
+  // tokens leave the Player's wallet and are not credited anywhere, which is
+  // the exact mirror of ADMIN_GRANT creating them from nowhere. Admin-tier
+  // for the same reason minting is — changing total supply in either
+  // direction is one tier's authority, and an Agent moving tokens around
+  // must never be able to reach it.
+  //
+  // This is emphatically NOT a withdrawal: nothing leaves the system for
+  // value, there is no counterparty, no payout destination, and no record of
+  // one anywhere in the schema. See ARCHITECTURE.md "Hard safety boundaries".
+  TOKEN_SURRENDER
+
+  @@map("ledger_source")
+}
+
+// Which of a user's two balances an entry moved. Needed because
+// balanceAfter would otherwise be ambiguous once a second wallet exists.
+enum LedgerWallet {
+  MAIN
+  WINNINGS
+
+  @@map("ledger_wallet")
+}
+
+model TokenLedgerEntry {
+  id String @id @default(uuid())
+
+  // Monotonic write order, and the only correct way to sort a statement.
+  // `createdAt` is transaction-START time (now() === transaction_timestamp),
+  // so under concurrency it can disagree with the order balances actually
+  // moved — see the ledger_monotonic_sequence migration for the case that
+  // exposed it. Assigned at INSERT, and applyDelta always inserts after the
+  // balance update it describes, so for one account this is effect order.
+  seq BigInt @unique @default(autoincrement())
+
+  userId       String       @map("user_id")
+  user         User         @relation("LedgerOwner", fields: [userId], references: [id])
+  delta        Int
+  wallet       LedgerWallet @default(MAIN)
+  balanceAfter Int          @map("balance_after")
+  source       LedgerSource
+
+  // Who caused this entry, when a person did: the Admin behind an
+  // ADMIN_GRANT, or the Agent behind an AGENT_TRANSFER. Null for
+  // system-generated prediction debit/stake/payout entries.
+  performedById String? @map("performed_by_id")
+  performedBy   User?   @relation("LedgerPerformedBy", fields: [performedById], references: [id])
+
+  predictionId String?     @map("prediction_id")
+  prediction   Prediction? @relation(fields: [predictionId], references: [id])
+
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Set when this movement was produced by resolving a TokenRequest.
+  tokenRequest TokenRequest?
+
+  @@index([userId, createdAt])
+  @@index([userId, seq])
+  @@map("token_ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Token requests — a Player asking for a balance change, in-system
+// ---------------------------------------------------------------------------
+
+enum TokenRequestKind {
+  // "Please give me tokens." Resolved by the Player's own Agent, out of the
+  // Agent's wallet, as an ordinary AGENT_TRANSFER — it moves supply that
+  // already exists and creates none.
+  TOP_UP
+  // "I want to give up these tokens." Resolved by an Admin, and the tokens
+  // are destroyed (TOKEN_SURRENDER). Admin-tier because it changes total
+  // supply, mirroring minting.
+  SURRENDER
+
+  @@map("token_request_kind")
+}
+
+enum TokenRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  // Withdrawn by the Player before anyone resolved it.
+  CANCELLED
+
+  @@map("token_request_status")
+}
+
+/**
+ * A Player's request for their balance to change, and its review trail.
+ *
+ * Deliberately carries no attachment, no external reference number, and no
+ * payout destination. A request is a message about tokens inside the system;
+ * it is not evidence of anything happening outside it, and there is no field
+ * here that could hold such evidence. See ARCHITECTURE.md "Hard safety
+ * boundaries" — screenshots live on SupportMessage and are structurally
+ * unrelated to the ledger, which is what keeps this from becoming an
+ * offline-payment reconciliation workflow.
+ *
+ * `claimedById` exists for the multi-reviewer case: staff triaging a queue
+ * need to see that someone else already picked a request up. It is advisory.
+ * The real protection against a double-resolve is that resolution is a
+ * conditional update on `status = PENDING` in the same transaction as the
+ * ledger write — if two reviewers race, exactly one updates a row and the
+ * other's whole transaction rolls back having moved nothing.
+ */
+model TokenRequest {
+  id          String             @id @default(uuid())
+  requesterId String             @map("requester_id")
+  requester   User               @relation("TokenRequestRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  kind        TokenRequestKind
+  status      TokenRequestStatus @default(PENDING)
+  amount      Int
+
+  /** The Player's own words. Free text only — never a transaction reference. */
+  note String?
+
+  // Advisory "someone is looking at this" marker; see the model doc.
+  claimedById String?   @map("claimed_by_id")
+  claimedBy   User?     @relation("TokenRequestClaimant", fields: [claimedById], references: [id])
+  claimedAt   DateTime? @map("claimed_at")
+
+  resolvedById   String?   @map("resolved_by_id")
+  resolvedBy     User?     @relation("TokenRequestResolver", fields: [resolvedById], references: [id])
+  resolvedAt     DateTime? @map("resolved_at")
+  resolutionNote String?   @map("resolution_note")
+
+  // The movement this request produced, when approved. Null on a rejection —
+  // and the pairing is what makes the queue auditable against the ledger.
+  ledgerEntryId String?           @unique @map("ledger_entry_id")
+  ledgerEntry   TokenLedgerEntry? @relation(fields: [ledgerEntryId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([requesterId, createdAt])
+  @@index([status, kind])
+  @@map("token_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions — server-side, revocable
+// ---------------------------------------------------------------------------
+
+model Session {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @map("token_hash")
+  ipAddress String?   @map("ip_address")
+  userAgent String?   @map("user_agent")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Bug/support messaging — deliberately unrelated to the ledger
+// ---------------------------------------------------------------------------
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+
+  @@map("support_status")
+}
+
+model SupportMessage {
+  id            String        @id @default(uuid())
+  authorId      String        @map("author_id")
+  author        User          @relation(fields: [authorId], references: [id])
+  subject       String
+  body          String
+  screenshotUrl String?       @map("screenshot_url")
+  status        SupportStatus @default(OPEN)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  @@index([authorId])
+  @@map("support_messages")
+}
+
+// ---------------------------------------------------------------------------
+// Prediction games — owned in DDL here, hot-path read/written by
+// prediction-service (Go) via raw SQL against these same tables.
+// ---------------------------------------------------------------------------
+
+enum GameStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+
+  @@map("game_status")
+}
+
+model Game {
+  id          String     @id @default(uuid())
+  name        String
+  description String?
+  status      GameStatus @default(DRAFT)
+
+  // Recurring daily clock times, read in `timezone` (below). A Game is
+  // entered once by Platform Admin; every day it runs (see
+  // weeklyOffDays/holidays) gets its own Round with concrete
+  // opensAt/closesAt derived from these at generation time — editing these
+  // only affects Rounds generated afterward, never retroactively repricing
+  // or reopening a day already generated.
+  openTime  DateTime @map("open_time") @db.Time
+  closeTime DateTime @map("close_time") @db.Time
+
+  // IANA zone (e.g. "Asia/Kolkata") the two clock times above and this
+  // game's Round.date are expressed in. Per-game rather than global: two
+  // games on one platform can run on different market clocks. Round
+  // opensAt/closesAt are absolute instants resolved from this once, at
+  // generation time, so a later zone change never moves a day already
+  // generated. Legacy rows carry 'UTC', which is what they were built as.
+  timezone String @default("UTC")
+
+  // Recurring weekly off days (0=Sunday..6=Saturday) the game doesn't run,
+  // e.g. [0] for "closed every Sunday". One-off exceptions (a specific
+  // holiday date) live in GameHoliday instead — together these are the
+  // "leave days" the round-generation scheduler skips.
+  weeklyOffDays Int[] @default([]) @map("weekly_off_days")
+
+  minStake Int @map("min_stake")
+  maxStake Int @map("max_stake")
+
+  createdById String @map("created_by_id")
+  createdBy   User   @relation(fields: [createdById], references: [id])
+
+  rounds      Round[]
+  holidays    GameHoliday[]
+  enablements GameEnablement[]
+  settlements Settlement[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("games")
+}
+
+// A one-off date this Game doesn't run — Platform Admin picks these.
+model GameHoliday {
+  id     String   @id @default(uuid())
+  gameId String   @map("game_id")
+  game   Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  date   DateTime @db.Date
+  reason String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([gameId, date])
+  @@map("game_holidays")
+}
+
+// Whether a Game is live for a given Admin's whole subtree — the single
+// on/off switch that reaches every Agent and Player under that Admin, with
+// no separate layer beneath it. Row absence means disabled: only explicit
+// opt-ins are stored, so a freshly created Game starts invisible to every
+// existing Admin until each one turns it on.
+model GameEnablement {
+  id      String  @id @default(uuid())
+  gameId  String  @map("game_id")
+  game    Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  adminId String  @map("admin_id")
+  admin   User    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  enabled Boolean @default(true)
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([gameId, adminId])
+  @@map("game_enablements")
+}
+
+enum RoundStatus {
+  OPEN
+  CLOSED
+  RESULT_PUBLISHED
+  CANCELLED
+
+  @@map("round_status")
+}
+
+// One calendar day's concrete instance of a Game — opensAt/closesAt are
+// fixed UTC instants computed once at generation time from the Game's
+// recurring openTime/closeTime, so a later edit to the Game only changes
+// Rounds generated after that edit. Auto-generated ahead of time by
+// prediction-service's scheduler, skipping weeklyOffDays/GameHoliday.
+// status is descriptive except for CANCELLED, which is the one value actual
+// cutoff enforcement checks — everything else is derived from comparing now
+// against opensAt/closesAt, not from this field.
+model Round {
+  id       String      @id @default(uuid())
+  gameId   String      @map("game_id")
+  game     Game        @relation(fields: [gameId], references: [id])
+  date     DateTime    @db.Date
+  opensAt  DateTime    @map("opens_at")
+  closesAt DateTime    @map("closes_at")
+  status   RoundStatus @default(OPEN)
+
+  // Nullable result placeholders — grading isn't built yet. Filled in later
+  // by whatever computes the day's winning numbers.
+  openPana  String? @map("open_pana")
+  closePana String? @map("close_pana")
+
+  predictions Prediction[]
+  settlements Settlement[]
+  corrections ResultCorrection[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([gameId, date])
+  @@index([gameId, status])
+  @@map("rounds")
+}
+
+// One published result being replaced by a different one.
+//
+// Correcting a result is destructive in a way nothing else in this system is:
+// it un-pays winners, re-grades every bet on the round, and throws away the
+// Admin<->Agent settlement so it can be rebuilt. The corrected round ends up
+// looking exactly as if the right numbers had been entered the first time,
+// which is the point — and also why the *fact* that it happened has to be
+// recorded somewhere that recomputation cannot erase. The ledger keeps the
+// per-account trail (RESULT_CORRECTION rows); this keeps the operator-facing
+// one: what the numbers were, what they became, who changed them, and how
+// much moved as a result.
+model ResultCorrection {
+  id      String @id @default(uuid())
+  roundId String @map("round_id")
+  round   Round  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+
+  previousOpenPana  String? @map("previous_open_pana")
+  previousClosePana String? @map("previous_close_pana")
+  newOpenPana       String? @map("new_open_pana")
+  newClosePana      String? @map("new_close_pana")
+
+  // Scale of the undo, captured before the re-grade overwrites it.
+  predictionsReset Int @map("predictions_reset")
+  payoutsReversed  Int @map("payouts_reversed")
+  // How many accounts the clawback pushed below zero. Not an error — see
+  // LedgerSource.RESULT_CORRECTION — but the number an operator most wants
+  // to see, because those Players spent winnings they turned out not to have.
+  accountsLeftNegative Int @map("accounts_left_negative")
+
+  performedById String @map("performed_by_id")
+  performedBy   User   @relation("ResultCorrectionAuthor", fields: [performedById], references: [id])
+  reason        String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([roundId])
+  @@map("result_corrections")
+}
+
+enum PredictionOutcome {
+  PENDING
+  WON
+  LOST
+
+  @@map("prediction_outcome")
+}
+
+// The 11 things a Player can actually place a bet on. Every OPEN_*/CLOSE_*
+// pair shares one odds rate with its family (SINGLE, SINGLE_PANA,
+// DOUBLE_PANA, TRIPLE_PANA — see the `rates` table/BetType) — this enum only
+// decides cutoff timing and pickedNumber format, never which Rate row
+// applies. JODI and both Sangams are open-cutoff despite having no
+// open/close split of their own — explicit, not an oversight.
+enum PredictionType {
+  OPEN_SINGLE
+  CLOSE_SINGLE
+  JODI
+  OPEN_SINGLE_PANA
+  CLOSE_SINGLE_PANA
+  OPEN_DOUBLE_PANA
+  CLOSE_DOUBLE_PANA
+  OPEN_TRIPLE_PANA
+  CLOSE_TRIPLE_PANA
+  HALF_SANGAM
+  FULL_SANGAM
+
+  @@map("prediction_type")
+}
+
+model Prediction {
+  id      String @id @default(uuid())
+  userId  String @map("user_id")
+  user    User   @relation(fields: [userId], references: [id])
+  roundId String @map("round_id")
+  round   Round  @relation(fields: [roundId], references: [id])
+
+  typeId       PredictionType @map("type_id")
+  pickedNumber String         @map("picked_number")
+  stake        Int
+
+  // Both sides of the rate chain, frozen at placement. Never re-derived
+  // later: a subsequent rate change must not reprice a bet already placed.
+  //
+  //   oddsMultiplier      — what the PLAYER is paid at (a PLAYING override
+  //                         if set, else the Agent's live GIVING card).
+  //                         This is the one settlement multiplies by.
+  //   agentOddsMultiplier — what the ADMIN pays the AGENT at for the same
+  //                         bet family (the Agent's GIVEN card). Added
+  //                         2026-08-05; now read by settlement to build the
+  //                         Admin<->Agent position (see Settlement).
+  //
+  // These two can differ in either direction — an Agent may deliberately
+  // offer a better rate than it receives and absorb the difference on a
+  // win (see ARCHITECTURE.md, giving-cap revision 2026-08-05).
+  oddsMultiplier      Int @map("odds_multiplier")
+  agentOddsMultiplier Int @default(0) @map("agent_odds_multiplier")
+
+  // Denormalized copy of the applicable cutoff (opensAt/closesAt minus one
+  // minute, per typeId's group), supplied by the application at insert time.
+  // A BEFORE INSERT trigger (see the prediction_cutoff migration)
+  // independently recomputes the authoritative cutoff from the Round row
+  // and rejects the insert if it disagrees — this column is not itself
+  // trusted, it's audit/debug visibility into what the app believed.
+  cutoffAt DateTime @map("cutoff_at")
+
+  outcome PredictionOutcome @default(PENDING)
+  payout  Int?
+
+  ledgerEntries TokenLedgerEntry[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([roundId])
+  @@index([userId, createdAt])
+  @@map("predictions")
+}
+
+// ---------------------------------------------------------------------------
+// Admin <-> Agent settlements (2026-08-05)
+//
+// The position between an Admin and one of its Agents for one game on one
+// day. Written when a result is entered, so the dashboards read stored
+// numbers rather than recomputing an aggregate on every page load.
+//
+// This is NOT a token movement. Player stakes and payouts move real balances
+// (see TokenLedgerEntry); the Admin/Agent relationship is pure accounting and
+// deliberately touches no wallet — see ARCHITECTURE.md "Settlements".
+//
+// **Signs are stored once, from the ADMIN's perspective**, and negated at
+// read time for the Agent. The two sides are exact mirrors — they operate at
+// one rate against each other — so storing both would be two things that
+// could disagree.
+// ---------------------------------------------------------------------------
+
+model Settlement {
+  id      String   @id @default(uuid())
+  roundId String   @map("round_id")
+  round   Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  gameId  String   @map("game_id")
+  game    Game     @relation(fields: [gameId], references: [id])
+  date    DateTime @db.Date
+
+  agentId String @map("agent_id")
+  agent   User   @relation("SettlementAgent", fields: [agentId], references: [id])
+  // Denormalized: the whole point of persisting this is to stop recomputing,
+  // and re-walking agent -> createdById on every dashboard read would put
+  // half of that back.
+  adminId String @map("admin_id")
+  admin   User   @relation("SettlementAdmin", fields: [adminId], references: [id])
+
+  // Copied from the Round for display, so a settlement row is readable on
+  // its own without joining back for the numbers it was computed from.
+  openPana  String? @map("open_pana")
+  closePana String? @map("close_pana")
+
+  // The "total amount played" row: every token this Agent's Players staked
+  // on this game/date. Positive for the Admin, negative for the Agent.
+  totalStaked Int @map("total_staked")
+  // Sum of `lines` — what the Admin owes on the numbers that came in, priced
+  // at the rate the Admin gives this Agent. Negative for the Admin.
+  totalPayout Int @map("total_payout")
+  // totalStaked - totalPayout, from the Admin's side. The Agent's position is
+  // exactly -net.
+  net Int
+
+  lines SettlementLine[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // One row per agent per round. Settlement recomputes and upserts on this,
+  // because a game settles in two passes (open, then close) and the second
+  // must produce a corrected total rather than a second partial row.
+  @@unique([roundId, agentId])
+  @@index([adminId, date])
+  @@index([agentId, date])
+  @@map("settlements")
+}
+
+// One winning number, and what it costs the Admin. Only winners produce a
+// line — a number nobody hit moves nothing between the tiers.
+model SettlementLine {
+  id           String     @id @default(uuid())
+  settlementId String     @map("settlement_id")
+  settlement   Settlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+
+  typeId       PredictionType @map("type_id")
+  pickedNumber String         @map("picked_number")
+
+  // Tokens this Agent's Players had on that number, the rate the ADMIN gives
+  // the AGENT for that bet family (Prediction.agentOddsMultiplier, not the
+  // player-facing rate), and the resulting amount.
+  stake     Int
+  agentOdds Int @map("agent_odds")
+  payout    Int
+
+  @@index([settlementId])
+  @@map("settlement_lines")
+}

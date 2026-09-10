@@ -1,0 +1,19 @@
+-- F-08: every date in this system was the UTC day.
+--
+-- A Game's openTime/closeTime are wall-clock times, and a Round's date is a
+-- calendar day, but both were resolved against UTC. For an IST-facing
+-- product that puts the betting day's rollover at 05:30 local: a Player
+-- betting at 01:00 IST is acting on what the system still calls yesterday,
+-- and an operator entering a result just after local midnight has to reason
+-- in the previous UTC date.
+--
+-- The zone belongs to the Game rather than to a global setting, because two
+-- games on one platform can legitimately run on different market clocks,
+-- and a Round's opens_at/closes_at are fixed instants derived once at
+-- generation time from the Game's zone.
+--
+-- Defaulted to 'UTC' rather than the market zone on purpose: existing rows
+-- were created under UTC semantics, and backfilling anything else would
+-- silently reinterpret rounds that already exist. New games get their zone
+-- from the API (see DEFAULT_GAME_TIMEZONE in games.service.ts).
+ALTER TABLE "games" ADD COLUMN "timezone" TEXT NOT NULL DEFAULT 'UTC';
