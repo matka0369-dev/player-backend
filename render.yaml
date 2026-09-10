@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: predictsim-core-service
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --include=dev && npx prisma generate && npx prisma migrate deploy && npm run build
+    startCommand: node dist/main
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_COOKIE_NAME
+        value: predictsim_sid
+      # Empty: the browser never calls this service cross-origin — the four
+      # Vercel UIs proxy it same-origin via /api/core/* rewrites. Add exact
+      # origins here only if you point a UI straight at the .onrender.com URL.
+      - key: CORS_ALLOWED_ORIGINS
+        value: ""
+      # Set these in the Render dashboard (Environment tab) — never commit them.
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
