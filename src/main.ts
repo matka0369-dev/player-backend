@@ -4,10 +4,16 @@ import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 
 // Dev: any localhost/127.0.0.1 port may call the API (frontends move ports
-// constantly during development). Prod: only origins explicitly listed in
-// CORS_ALLOWED_ORIGINS. Credentials are on because auth is a session cookie,
-// which means the origin must be reflected exactly — "*" is not permitted
-// by browsers alongside credentials.
+// constantly during development). Prod: reflect credentials-enabled CORS
+// headers only for origins explicitly listed in CORS_ALLOWED_ORIGINS.
+//
+// An unlisted origin is NOT hard-rejected — the request is served with no
+// CORS headers. The four portals call this API same-origin through Vercel
+// rewrites (/api/core/*), and Vercel forwards the browser's Origin header;
+// the browser does no CORS enforcement on a same-origin response, so the
+// absent headers are harmless there. A genuinely cross-origin caller still
+// gets no Access-Control-Allow-Origin / -Credentials and is blocked by the
+// browser exactly as before. "*" is never permitted alongside credentials.
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 function buildCorsOrigin() {
@@ -22,7 +28,8 @@ function buildCorsOrigin() {
     if (!origin) return callback(null, true);
     if (!isProd && LOCALHOST_ORIGIN.test(origin)) return callback(null, true);
     if (allowlist.includes(origin)) return callback(null, true);
-    return callback(new Error(`Origin not allowed by CORS: ${origin}`));
+    // Unlisted origin: serve the request, add no CORS headers.
+    return callback(null, false);
   };
 }
 
