@@ -583,4 +583,63 @@ export class UsersService {
   // Agent's roster. See ARCHITECTURE.md "Native tier authority is
   // intrinsic" for how this replaced the earlier PATCH /users/:id/agent
   // endpoint.
+
+  // Platform Admin's one window into an Admin's business — everything else
+  // about that Admin's subtree (individual Agents, Players, predictions)
+  // deliberately stays invisible per ARCHITECTURE.md, but a rollup of *how
+  // big* that business is doesn't leak anything about any one account in
+  // it. "Daily average play" is all-time volume divided by how long the
+  // Admin has existed — a business two days old and one two years old with
+  // the same lifetime total obviously don't have the same daily pace.
+  async businessSummary(adminId: string) {
+    const admin = await this.prisma.user.findFirst({
+      where: { id: adminId, accountType: 'ADMIN' },
+      select: { id: true, username: true, createdAt: true },
+    });
+    if (!admin) throw new NotFoundException('Admin not found');
+
+    const agents = await this.prisma.user.findMany({
+      where: { accountType: 'AGENT', createdById: adminId },
+      select: { id: true, isActive: true },
+    });
+    const agentIds = agents.map((a) => a.id);
+
+    const [players, predictionAgg] = await Promise.all([
+      agentIds.length
+        ? this.prisma.user.findMany({
+            where: { accountType: 'PLAYER', agentId: { in: agentIds } },
+            select: { isActive: true },
+          })
+        : Promise.resolve([]),
+      agentIds.length
+        ? this.prisma.prediction.aggregate({
+            where: { user: { accountType: 'PLAYER', agentId: { in: agentIds } } },
+            _count: true,
+            _sum: { stake: true },
+          })
+        : Promise.resolve({ _count: 0, _sum: { stake: null as number | null } }),
+    ]);
+
+    const daysActive = Math.max(
+      1,
+      Math.ceil((Date.now() - admin.createdAt.getTime()) / (24 * 60 * 60 * 1000)),
+    );
+    const totalCount = predictionAgg._count;
+    const totalStake = predictionAgg._sum.stake ?? 0;
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    return {
+      adminId: admin.id,
+      username: admin.username,
+      createdAt: admin.createdAt,
+      agents: { total: agents.length, active: agents.filter((a) => a.isActive).length },
+      players: { total: players.length, active: players.filter((p) => p.isActive).length },
+      predictions: {
+        totalCount,
+        totalStake,
+        dailyAverageCount: round2(totalCount / daysActive),
+        dailyAverageStake: round2(totalStake / daysActive),
+      },
+    };
+  }
 }

@@ -48,6 +48,17 @@ export class UsersController {
     return this.usersService.findOneScoped(id, req.user!);
   }
 
+  // Platform Admin clicking into one Admin from its roster — a rollup
+  // (agent/player counts, lifetime and daily-average play), never the
+  // individual accounts or predictions underneath. See UsersService for why
+  // this is exactly the boundary ARCHITECTURE.md draws for this tier.
+  @Get(':id/business-summary')
+  @UseGuards(AccountTypesGuard)
+  @RequireAccountTypes('PLATFORM_ADMIN')
+  businessSummary(@Param('id') id: string) {
+    return this.usersService.businessSummary(id);
+  }
+
   // What toggling this account would take down (or restore) with it. Read-only
   // — the UI calls this to show a real blast radius before asking to confirm.
   @Get(':id/status-impact')
