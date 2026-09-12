@@ -171,7 +171,9 @@ export class GamesService {
     if (requester.accountType === 'PLATFORM_ADMIN') {
       const games = await this.prisma.game.findMany({
         include: { holidays: { orderBy: { date: 'asc' } } },
-        orderBy: { name: 'asc' },
+        // By schedule, not alphabetically — a management list reads better
+        // as the day's actual running order.
+        orderBy: { openTime: 'asc' },
       });
       return games.map((g) => serializeGame(g));
     }
@@ -180,7 +182,7 @@ export class GamesService {
     const games = await this.prisma.game.findMany({
       where: { status: 'ACTIVE' },
       include: { enablements: { where: { adminId } } },
-      orderBy: { name: 'asc' },
+      orderBy: { openTime: 'asc' },
     });
     return games.map((g) => ({
       ...serializeGame(g),
