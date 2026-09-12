@@ -13,9 +13,17 @@ export class LedgerController {
   // Scoped inside the service — an Admin sees its subtree, an Agent its
   // Players, a Player only itself.
   @Get()
-  history(@Req() req: AuthenticatedRequest, @Query('limit') limit?: string) {
+  history(
+    @Req() req: AuthenticatedRequest,
+    @Query('limit') limit?: string,
+    @Query('date') date?: string,
+    @Query('agentId') agentId?: string,
+  ) {
     const parsed = Number(limit);
-    return this.ledgerService.history(req.user!, Number.isFinite(parsed) ? parsed : undefined);
+    return this.ledgerService.history(req.user!, Number.isFinite(parsed) ? parsed : undefined, {
+      date,
+      agentId,
+    });
   }
 
   // Authorization lives in the service (token:administer + downward-only

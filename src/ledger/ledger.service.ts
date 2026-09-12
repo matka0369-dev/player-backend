@@ -10,6 +10,17 @@ type Tx = Prisma.TransactionClient;
 /** Sanity bound on a single grant — not a currency limit, a fat-finger guard. */
 export const MAX_GRANT = 10_000_000;
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** [start, end) in UTC for the calendar day `date` (a "YYYY-MM-DD" string)
+ *  names. Ledger entries carry no per-user timezone, so the day boundary is
+ *  plain UTC rather than trying to guess whose local day a caller means. */
+function utcDayRange(date: string): { gte: Date; lt: Date } {
+  const gte = new Date(`${date}T00:00:00.000Z`);
+  return { gte, lt: new Date(gte.getTime() + 24 * 60 * 60 * 1000) };
+}
+
 @Injectable()
 export class LedgerService {
   constructor(private readonly prisma: PrismaService) {}
@@ -421,9 +432,26 @@ export class LedgerService {
    * subtree, an Agent its own Players', a Player only its own — the same
    * ownership rule the rest of the API uses, applied to money-shaped rows.
    */
-  async history(requester: AuthenticatedUser, limit = 100) {
+  async history(
+    requester: AuthenticatedUser,
+    limit = 100,
+    filters?: {
+      /** UTC calendar day, "YYYY-MM-DD". Unset shows every day. */
+      date?: string;
+      /** ADMIN tier only — narrow to one of the caller's own Agents (that
+       *  Agent's own rows plus its Players'). Unset shows the whole subtree. */
+      agentId?: string;
+    },
+  ) {
     const ownerId = resolveScopeOwnerId(requester);
     const tier = effectiveTier(requester);
+
+    if (filters?.date && !DATE_RE.test(filters.date)) {
+      throw new BadRequestException('date must be YYYY-MM-DD');
+    }
+    if (filters?.agentId && !UUID_RE.test(filters.agentId)) {
+      throw new BadRequestException('agentId must be a UUID');
+    }
 
     let userFilter: Prisma.TokenLedgerEntryWhereInput;
 
@@ -434,11 +462,26 @@ export class LedgerService {
           select: { id: true },
         })
       ).map((a) => a.id);
-      userFilter = {
-        user: {
-          OR: [{ createdById: ownerId }, { agentId: { in: agentIds } }],
-        },
-      };
+
+      if (filters?.agentId) {
+        // Checked against this Admin's own agent list first — passing a
+        // foreign Admin's agent id must 404, never leak that subtree's ledger.
+        if (!agentIds.includes(filters.agentId)) {
+          throw new NotFoundException('Agent not found');
+        }
+        userFilter = {
+          OR: [
+            { userId: filters.agentId },
+            { user: { accountType: 'PLAYER', agentId: filters.agentId } },
+          ],
+        };
+      } else {
+        userFilter = {
+          user: {
+            OR: [{ createdById: ownerId }, { agentId: { in: agentIds } }],
+          },
+        };
+      }
     } else if (tier === 'AGENT') {
       // The Agent's own rows *and* its Players'. Its own were previously
       // excluded by the accountType filter, which left an Agent able to
@@ -455,8 +498,12 @@ export class LedgerService {
       userFilter = { userId: requester.id };
     }
 
+    const where: Prisma.TokenLedgerEntryWhereInput = filters?.date
+      ? { AND: [userFilter, { createdAt: utcDayRange(filters.date) }] }
+      : userFilter;
+
     return this.prisma.tokenLedgerEntry.findMany({
-      where: userFilter,
+      where,
       // By write order, not by clock: createdAt is transaction-start time and
       // can put rows in an order where balance_after doesn't chain. `seq` is
       // deliberately not selected below — it exists to sort by, and emitting
