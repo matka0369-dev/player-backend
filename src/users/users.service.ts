@@ -610,14 +610,14 @@ export class UsersService {
             where: { accountType: 'PLAYER', agentId: { in: agentIds } },
             select: { isActive: true },
           })
-        : Promise.resolve([]),
+        : Promise.resolve([] as { isActive: boolean }[]),
       agentIds.length
         ? this.prisma.prediction.aggregate({
             where: { user: { accountType: 'PLAYER', agentId: { in: agentIds } } },
             _count: true,
             _sum: { stake: true },
           })
-        : Promise.resolve({ _count: 0, _sum: { stake: null as number | null } }),
+        : Promise.resolve({ _count: 0 as number, _sum: { stake: null as number | null } }),
     ]);
 
     const daysActive = Math.max(
