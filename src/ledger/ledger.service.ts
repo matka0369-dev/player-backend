@@ -438,8 +438,8 @@ export class LedgerService {
     filters?: {
       /** UTC calendar day, "YYYY-MM-DD". Unset shows every day. */
       date?: string;
-      /** ADMIN tier only — narrow to one of the caller's own Agents (that
-       *  Agent's own rows plus its Players'). Unset shows the whole subtree. */
+      /** ADMIN tier only — narrow to one of the caller's own Agents. Unset
+       *  shows every Agent. */
       agentId?: string;
     },
   ) {
@@ -463,24 +463,21 @@ export class LedgerService {
         })
       ).map((a) => a.id);
 
+      // An Admin's statement is what it moved on its Agents' own wallets —
+      // the grants it made and, for visibility, the transfers those Agents
+      // then made out of them. It stops there: what an Agent does with a
+      // Player is that Agent's own book, not the Admin's — a Player's stake
+      // and settlement rows never appear here, same as an Admin never sees
+      // a Player show up in "Your agents".
       if (filters?.agentId) {
         // Checked against this Admin's own agent list first — passing a
         // foreign Admin's agent id must 404, never leak that subtree's ledger.
         if (!agentIds.includes(filters.agentId)) {
           throw new NotFoundException('Agent not found');
         }
-        userFilter = {
-          OR: [
-            { userId: filters.agentId },
-            { user: { accountType: 'PLAYER', agentId: filters.agentId } },
-          ],
-        };
+        userFilter = { userId: filters.agentId };
       } else {
-        userFilter = {
-          user: {
-            OR: [{ createdById: ownerId }, { agentId: { in: agentIds } }],
-          },
-        };
+        userFilter = { userId: { in: agentIds } };
       }
     } else if (tier === 'AGENT') {
       // The Agent's own rows *and* its Players'. Its own were previously
