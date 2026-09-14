@@ -2,7 +2,6 @@ import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
-  IsEmail,
   IsIn,
   IsInt,
   IsOptional,
@@ -11,10 +10,38 @@ import {
   Max,
   Min,
   MinLength,
+  Validate,
   ValidateNested,
+  ValidatorConstraint,
+  isEmail,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
 import { PROFIT_SHARE_TOTAL } from '../../rates/rates.constants';
 import { RateEntryDto } from '../../rates/dto/update-rates.dto';
+
+// E.164's own length bound (max 15 digits) with an optional leading '+' —
+// loose about everything else, since this only has to reject obvious
+// garbage, not validate a specific country's numbering plan.
+const PHONE_RE = /^\+?[0-9]{7,15}$/;
+
+/**
+ * The `email` field (DB column, DTOs, and every TS type down to the
+ * frontend all still call it that — renaming it everywhere it's read would
+ * be pure churn for a field whose only job is "how does someone sign in")
+ * now accepts a phone number too. Kept as one column rather than splitting
+ * into email/phone: it was already the sole login identifier alongside
+ * username (see AuthService.login's `OR: [{ email }, { username }]`), and
+ * that lookup doesn't care what shape the string is.
+ */
+@ValidatorConstraint({ name: 'isEmailOrPhone', async: false })
+export class IsEmailOrPhone implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    return typeof value === 'string' && (isEmail(value) || PHONE_RE.test(value));
+  }
+  defaultMessage(): string {
+    return 'email must be a valid email address or phone number';
+  }
+}
 
 // Note: 'PLATFORM_ADMIN' is deliberately not a valid value here — the only
 // Platform Admin account is created by the seed script, never via API.
@@ -24,7 +51,8 @@ const CREATABLE_ACCOUNT_TYPES = ['ADMIN', 'AGENT', 'PLAYER', 'ADMIN_STAFF', 'AGE
 export type CreatableAccountType = (typeof CREATABLE_ACCOUNT_TYPES)[number];
 
 export class CreateUserDto {
-  @IsEmail()
+  @IsString()
+  @Validate(IsEmailOrPhone)
   email!: string;
 
   @IsString()
