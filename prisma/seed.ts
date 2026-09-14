@@ -74,7 +74,7 @@ async function main() {
         'Set them in .env and re-run `npx prisma db seed` to create the first account.',
     );
   } else {
-    const existing = await prisma.user.findUnique({ where: { email: bootstrapEmail } });
+    const existing = await prisma.user.findFirst({ where: { email: bootstrapEmail } });
     if (existing) {
       console.log(`Platform Admin ${bootstrapEmail} already exists, skipping.`);
     } else {

@@ -33,7 +33,14 @@ enum AccountType {
 
 model User {
   id           String      @id @default(uuid())
-  email        String      @unique
+  // Not globally unique at the DB level: a Player's email/phone is unique
+  // only within its creating Admin's subtree (enforced in
+  // UsersService.create), since two different Admins are independent
+  // businesses and the same phone legitimately playing under both isn't a
+  // collision. Every other tier is still kept platform-wide unique by the
+  // same app-level check. Indexed (not unique) so lookups and the "search by
+  // phone" filter stay fast without reintroducing a global constraint.
+  email        String
   username     String      @unique
   passwordHash String      @map("password_hash")
   accountType  AccountType @map("account_type")
@@ -113,6 +120,7 @@ model User {
 
   @@index([accountType])
   @@index([agentId])
+  @@index([email])
   @@map("users")
 }
 

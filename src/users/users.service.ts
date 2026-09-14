@@ -368,11 +368,37 @@ export class UsersService {
       }
     }
 
-    const existing = await this.prisma.user.findFirst({
-      where: { OR: [{ email: dto.email }, { username: dto.username }] },
+    // Username stays a platform-wide collision for every tier — it's a login
+    // identifier shown across the whole hierarchy (see UserTable's "Belongs
+    // to" column), so two accounts sharing one anywhere would be ambiguous
+    // regardless of who created them.
+    const usernameClash = await this.prisma.user.findFirst({ where: { username: dto.username } });
+    if (usernameClash) {
+      throw new ConflictException('Username already in use');
+    }
+
+    // Email/phone is different for a Player: two different Admins are two
+    // independent businesses, and the same phone number legitimately
+    // playing under both isn't a collision worth blocking. Scoped to the
+    // creating Admin's whole subtree instead — every Agent under that one
+    // Admin — which still catches the collision that *does* matter: the
+    // same phone signing up for a second Player account under a different
+    // Agent of the same Admin. Every other tier (Admin, Agent, staff) keeps
+    // the old platform-wide check; those are core operator accounts, not
+    // Players, and a collision there has bigger consequences.
+    const emailScope: Prisma.UserWhereInput =
+      dto.accountType === 'PLAYER'
+        ? { accountType: 'PLAYER', agentId: { in: await this.agentIdsOwnedBy(requester.createdById!) } }
+        : {};
+    const emailClash = await this.prisma.user.findFirst({
+      where: { ...emailScope, email: dto.email },
     });
-    if (existing) {
-      throw new ConflictException('Email or username already in use');
+    if (emailClash) {
+      throw new ConflictException(
+        dto.accountType === 'PLAYER'
+          ? 'A player with this email or phone number already exists under this admin'
+          : 'Email or phone number already in use',
+      );
     }
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
