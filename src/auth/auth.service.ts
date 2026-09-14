@@ -3,7 +3,12 @@ import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { PermissionKey } from '../rbac/permissions.constants';
 import { AuthenticatedUser } from './auth.types';
-import { generateSessionToken, hashSessionToken, SESSION_TTL_MS } from './session-token.util';
+import {
+  generateSessionToken,
+  hashSessionToken,
+  SESSION_RENEW_AFTER_MS,
+  SESSION_TTL_MS,
+} from './session-token.util';
 
 const userWithRolesInclude = {
   roles: {
@@ -88,7 +93,13 @@ export class AuthService {
     });
   }
 
-  async validateSession(rawToken: string): Promise<AuthenticatedUser | null> {
+  // Sliding session: a device that's used within its window never has to
+  // sign in again, only one that's been idle past SESSION_TTL_MS entirely.
+  // `renewed` tells the guard whether to push the cookie's maxAge out to
+  // match — the DB write already happened here either way it's due.
+  async validateSession(
+    rawToken: string,
+  ): Promise<{ user: AuthenticatedUser; renewed: boolean } | null> {
     const session = await this.prisma.session.findUnique({
       where: { tokenHash: hashSessionToken(rawToken) },
       include: { user: { include: userWithRolesInclude } },
@@ -101,14 +112,26 @@ export class AuthService {
       return null;
     }
 
+    let renewed = false;
+    if (session.expiresAt.getTime() - Date.now() < SESSION_TTL_MS - SESSION_RENEW_AFTER_MS) {
+      await this.prisma.session.update({
+        where: { id: session.id },
+        data: { expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
+      });
+      renewed = true;
+    }
+
     return {
-      id: session.user.id,
-      email: session.user.email,
-      username: session.user.username,
-      accountType: session.user.accountType,
-      agentId: session.user.agentId,
-      createdById: session.user.createdById,
-      permissions: toPermissionKeys(session.user),
+      renewed,
+      user: {
+        id: session.user.id,
+        email: session.user.email,
+        username: session.user.username,
+        accountType: session.user.accountType,
+        agentId: session.user.agentId,
+        createdById: session.user.createdById,
+        permissions: toPermissionKeys(session.user),
+      },
     };
   }
 
