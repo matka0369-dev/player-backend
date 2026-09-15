@@ -4,6 +4,13 @@
 
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB decoded
 
+// How long an attached image's bytes stick around before RequestsService's
+// scheduled purge clears them — the request row itself (kind, amount,
+// status, note, resolution) is never touched, only imageData/imageMimeType.
+// See ARCHITECTURE.md "Hard safety boundaries" (2026-09-15 revision).
+export const IMAGE_RETENTION_DAYS = 15;
+export const IMAGE_RETENTION_MS = IMAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
 const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 
 const DATA_URL_RE = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+=*)$/;

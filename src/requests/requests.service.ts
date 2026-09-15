@@ -3,8 +3,10 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { LedgerSource, Prisma, TokenRequestKind, TokenRequestStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -12,7 +14,7 @@ import { AuthenticatedUser } from '../auth/auth.types';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { effectiveTier, resolveScopeOwnerId } from '../rbac/scope.util';
 import { CreateTokenRequestDto, ResolveTokenRequestDto } from './dto/create-request.dto';
-import { parseImageDataUrl } from './image-data-url.util';
+import { IMAGE_RETENTION_MS, parseImageDataUrl } from './image-data-url.util';
 
 const requestSelect = {
   id: true,
@@ -36,6 +38,8 @@ const requestSelect = {
 
 @Injectable()
 export class RequestsService {
+  private readonly logger = new Logger(RequestsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledgerService: LedgerService,
@@ -329,6 +333,28 @@ export class RequestsService {
     }
 
     return { data: req.imageData, mimeType: req.imageMimeType };
+  }
+
+  /**
+   * Clears imageData/imageMimeType off any request whose image has outlived
+   * IMAGE_RETENTION_MS (15 days from when it was raised) — never the row
+   * itself. Once cleared, getImage 404s the same way a request that never
+   * had an image does; there's no separate "expired" state to model.
+   *
+   * Runs daily rather than precisely at the 15-day mark: a few hours of
+   * slack on a retention window measured in days isn't worth a per-row
+   * timer, and this only ever narrows what's stored, never what's kept.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async purgeExpiredImages(): Promise<void> {
+    const cutoff = new Date(Date.now() - IMAGE_RETENTION_MS);
+    const { count } = await this.prisma.tokenRequest.updateMany({
+      where: { imageData: { not: null }, createdAt: { lt: cutoff } },
+      data: { imageData: null, imageMimeType: null },
+    });
+    if (count > 0) {
+      this.logger.log(`Purged ${count} token-request image(s) past the retention window`);
+    }
   }
 
   /** Whether `requester` is a reviewer whose scope covers a request raised
