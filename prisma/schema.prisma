@@ -388,6 +388,14 @@ model TokenRequest {
   /** The Player's own words. Free text only — never a transaction reference. */
   note String?
 
+  // One optional image, shown to whichever reviewer already has this
+  // request in scope — never parsed, never treated as proof of anything
+  // that happened outside this ledger. See ARCHITECTURE.md "Hard safety
+  // boundaries" (2026-09-15 revision) for why this exists and what it
+  // deliberately does not do. Capped at 2MB decoded, enforced in the DTO.
+  imageData     Bytes?  @map("image_data")
+  imageMimeType String? @map("image_mime_type")
+
   // Advisory "someone is looking at this" marker; see the model doc.
   claimedById String?   @map("claimed_by_id")
   claimedBy   User?     @relation("TokenRequestClaimant", fields: [claimedById], references: [id])

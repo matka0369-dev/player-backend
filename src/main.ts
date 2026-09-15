@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
+import { json } from 'express';
 import { AppModule } from './app.module';
 
 // Dev: any localhost/127.0.0.1 port may call the API (frontends move ports
@@ -36,6 +37,10 @@ function buildCorsOrigin() {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: buildCorsOrigin(), credentials: true });
+  // Express's default JSON body limit (100kb) is well under a base64-encoded
+  // 2MB image request — see MAX_IMAGE_BYTES in requests/image-data-url.util.
+  // 6mb covers that with room for the rest of the JSON envelope.
+  app.use(json({ limit: '6mb' }));
   app.use(cookieParser());
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
   await app.listen(process.env.PORT ?? 3000);

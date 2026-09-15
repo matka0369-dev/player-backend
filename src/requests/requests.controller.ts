@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { TokenRequestStatus } from '@prisma/client';
+import type { Response } from 'express';
 import { SessionAuthGuard } from '../auth/guards/session-auth.guard';
 import { AccountTypesGuard } from '../rbac/account-types.guard';
 import { RequireAccountTypes } from '../rbac/account-types.decorator';
@@ -34,6 +35,21 @@ export class RequestsController {
   @RequireAccountTypes('PLAYER')
   mine(@Req() req: AuthenticatedRequest) {
     return this.requestsService.mine(req.user!);
+  }
+
+  // Every tier that can ever see a request at all — the service is what
+  // actually narrows this to "your own, or one already in your scope."
+  @Get(':id/image')
+  @UseGuards(AccountTypesGuard)
+  @RequireAccountTypes('PLAYER', 'AGENT', 'AGENT_STAFF', 'ADMIN', 'ADMIN_STAFF')
+  async image(@Param('id') id: string, @Req() req: AuthenticatedRequest, @Res() res: Response) {
+    const { data, mimeType } = await this.requestsService.getImage(id, req.user!);
+    res.setHeader('Content-Type', mimeType);
+    // Bytes never change once attached (there's no edit path), and this is
+    // the one route on the whole API where the payload is worth caching —
+    // private since it's never a shared/public URL.
+    res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
+    res.send(Buffer.from(data));
   }
 
   @Post(':id/cancel')

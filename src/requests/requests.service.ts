@@ -12,6 +12,7 @@ import { AuthenticatedUser } from '../auth/auth.types';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { effectiveTier, resolveScopeOwnerId } from '../rbac/scope.util';
 import { CreateTokenRequestDto, ResolveTokenRequestDto } from './dto/create-request.dto';
+import { parseImageDataUrl } from './image-data-url.util';
 
 const requestSelect = {
   id: true,
@@ -19,6 +20,10 @@ const requestSelect = {
   status: true,
   amount: true,
   note: true,
+  // Not imageData — that's the full decoded bytes and has no business in a
+  // list response. Its presence is all a row needs to say; the actual
+  // bytes are fetched on demand via getImage, one request at a time.
+  imageMimeType: true,
   claimedAt: true,
   resolvedAt: true,
   resolutionNote: true,
@@ -73,8 +78,24 @@ export class RequestsService {
       throw new ConflictException(`You already have a pending ${dto.kind} request`);
     }
 
+    // Already validated well-formed and under the size cap by the DTO;
+    // parsed again here rather than trusting a value that crossed a
+    // process boundary in between.
+    const image = dto.image ? parseImageDataUrl(dto.image) : null;
+
     return this.prisma.tokenRequest.create({
-      data: { requesterId: requester.id, kind: dto.kind, amount: dto.amount, note: dto.note },
+      data: {
+        requesterId: requester.id,
+        kind: dto.kind,
+        amount: dto.amount,
+        note: dto.note,
+        // Cast, not a real type hole: TS's DOM lib types Uint8Array generic
+        // over ArrayBufferLike (which admits SharedArrayBuffer) since 5.7,
+        // but parseImageDataUrl only ever produces one backed by a plain
+        // ArrayBuffer, which is all Prisma's Bytes columns accept.
+        imageData: image?.buffer as Uint8Array<ArrayBuffer> | undefined,
+        imageMimeType: image?.mimeType,
+      },
       select: requestSelect,
     });
   }
@@ -281,6 +302,57 @@ export class RequestsService {
     });
   }
 
+  /**
+   * The one image a request may carry, if it has one. Same audience as the
+   * request itself: the Player who attached it, or a reviewer who already
+   * has that request in scope — never anyone else. 404 either way a caller
+   * isn't entitled, matching loadInScope's "existence isn't information the
+   * caller is owed."
+   */
+  async getImage(id: string, requester: AuthenticatedUser): Promise<{ data: Uint8Array; mimeType: string }> {
+    const req = await this.prisma.tokenRequest.findUnique({
+      where: { id },
+      select: {
+        requesterId: true,
+        imageData: true,
+        imageMimeType: true,
+        requester: { select: { agentId: true } },
+      },
+    });
+    if (!req?.imageData || !req.imageMimeType) {
+      throw new NotFoundException('Request or image not found');
+    }
+
+    const isOwner = requester.id === req.requesterId;
+    if (!isOwner && !(await this.isInReviewerScope(req.requester.agentId, requester))) {
+      throw new NotFoundException('Request or image not found');
+    }
+
+    return { data: req.imageData, mimeType: req.imageMimeType };
+  }
+
+  /** Whether `requester` is a reviewer whose scope covers a request raised
+   *  by a Player under the given Agent — the same rule loadInScope enforces,
+   *  factored out so getImage can't drift from it. */
+  private async isInReviewerScope(
+    requesterAgentId: string | null,
+    requester: AuthenticatedUser,
+  ): Promise<boolean> {
+    const ownerId = resolveScopeOwnerId(requester);
+    const tier = effectiveTier(requester);
+
+    if (tier === 'AGENT') {
+      return requesterAgentId === ownerId;
+    }
+    if (tier === 'ADMIN') {
+      const owned = await this.prisma.user.count({
+        where: { id: requesterAgentId ?? '', createdById: ownerId },
+      });
+      return owned > 0;
+    }
+    return false;
+  }
+
   private assertMayTriage(requester: AuthenticatedUser) {
     const native = requester.accountType === 'AGENT' || requester.accountType === 'ADMIN';
     if (native) return;
@@ -295,8 +367,10 @@ export class RequestsService {
    * information the caller is owed.
    */
   private async loadInScope(id: string, requester: AuthenticatedUser) {
-    const ownerId = resolveScopeOwnerId(requester);
     const tier = effectiveTier(requester);
+    if (tier !== 'AGENT' && tier !== 'ADMIN') {
+      throw new ForbiddenException('Your account type cannot review token requests');
+    }
 
     const req = await this.prisma.tokenRequest.findUnique({
       where: { id },
@@ -310,15 +384,8 @@ export class RequestsService {
     });
     if (!req) throw new NotFoundException('Request not found');
 
-    if (tier === 'AGENT') {
-      if (req.requester.agentId !== ownerId) throw new NotFoundException('Request not found');
-    } else if (tier === 'ADMIN') {
-      const owned = await this.prisma.user.count({
-        where: { id: req.requester.agentId ?? '', createdById: ownerId },
-      });
-      if (owned === 0) throw new NotFoundException('Request not found');
-    } else {
-      throw new ForbiddenException('Your account type cannot review token requests');
+    if (!(await this.isInReviewerScope(req.requester.agentId, requester))) {
+      throw new NotFoundException('Request not found');
     }
 
     return req;
