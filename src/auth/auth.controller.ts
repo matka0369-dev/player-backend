@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { SessionAuthGuard } from './guards/session-auth.guard';
-import { sessionCookieNameForRequest } from './session-cookie.constants';
+import { sessionCookieFromRequest, sessionCookieNameForRequest } from './session-cookie.constants';
 import type { AuthenticatedRequest } from './auth.types';
 import { SESSION_TTL_MS, hashSessionToken } from './session-token.util';
 
@@ -40,11 +40,11 @@ export class AuthController {
   @HttpCode(200)
   @UseGuards(SessionAuthGuard)
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const rawToken: string | undefined = req.cookies?.[sessionCookieNameForRequest(req)];
-    if (rawToken) {
-      await this.authService.logout(rawToken);
+    const found = sessionCookieFromRequest(req);
+    if (found) {
+      await this.authService.logout(found.rawToken);
     }
-    res.clearCookie(sessionCookieNameForRequest(req));
+    res.clearCookie(found?.name ?? sessionCookieNameForRequest(req));
     return { success: true };
   }
 
@@ -58,8 +58,8 @@ export class AuthController {
   @Get('sessions')
   @UseGuards(SessionAuthGuard)
   listSessions(@Req() req: AuthenticatedRequest) {
-    const rawToken: string | undefined = req.cookies?.[sessionCookieNameForRequest(req)];
-    return this.authService.listSessions(req.user!.id, rawToken ? hashSessionToken(rawToken) : undefined);
+    const found = sessionCookieFromRequest(req);
+    return this.authService.listSessions(req.user!.id, found ? hashSessionToken(found.rawToken) : undefined);
   }
 
   // Revoke one specific session (e.g. "log out that one device").
@@ -77,8 +77,8 @@ export class AuthController {
   @HttpCode(200)
   @UseGuards(SessionAuthGuard)
   async revokeOtherSessions(@Req() req: AuthenticatedRequest) {
-    const rawToken: string | undefined = req.cookies?.[sessionCookieNameForRequest(req)];
-    await this.authService.revokeAllSessions(req.user!.id, rawToken ? hashSessionToken(rawToken) : undefined);
+    const found = sessionCookieFromRequest(req);
+    await this.authService.revokeAllSessions(req.user!.id, found ? hashSessionToken(found.rawToken) : undefined);
     return { success: true };
   }
 }

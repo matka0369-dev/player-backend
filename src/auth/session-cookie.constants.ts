@@ -47,3 +47,33 @@ export function sessionCookieNameForRequest(req: { headers?: Record<string, unkn
   const raw = req.headers?.[PORTAL_HEADER];
   return sessionCookieNameFor(Array.isArray(raw) ? raw[0] : raw);
 }
+
+/**
+ * Finds the session cookie actually present on a request — both its name
+ * and value — rather than assuming the one `sessionCookieNameForRequest`
+ * would compute from the `X-Portal` header is the one that's there.
+ *
+ * A plain `<img src>` request (the token-request image thumbnail) can never
+ * carry a custom header, so `X-Portal` is always absent on it — but the
+ * browser still sends every cookie for the origin, which on any single
+ * portal's own origin is exactly one: the namespaced cookie that portal's
+ * own login set. Looking only for the *computed* (unnamespaced, since no
+ * header) name would 401 a cookie that is genuinely there. Falls back to
+ * the first cookie whose name carries `SESSION_COOKIE_NAME` as a prefix —
+ * safe because one origin never holds more than one session cookie.
+ */
+export function sessionCookieFromRequest(req: {
+  headers?: Record<string, unknown>;
+  cookies?: Record<string, string | undefined>;
+}): { name: string; rawToken: string } | null {
+  const computedName = sessionCookieNameForRequest(req);
+  const direct = req.cookies?.[computedName];
+  if (direct) return { name: computedName, rawToken: direct };
+
+  for (const [name, value] of Object.entries(req.cookies ?? {})) {
+    if (value && name.startsWith(SESSION_COOKIE_NAME)) {
+      return { name, rawToken: value };
+    }
+  }
+  return null;
+}
