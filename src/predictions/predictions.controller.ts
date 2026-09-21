@@ -35,12 +35,13 @@ export class PredictionsController {
     return this.predictionsService.listForSubtree(req.user!);
   }
 
-  // The Admin book: totals per number, never per player. Agent tier is
-  // excluded deliberately — an Agent has few enough players that the
-  // itemised list on GET /predictions is the more useful view for it.
+  // The book: totals per number, never per player. Admin tier over its whole
+  // subtree; Agent tier (added 2026-09-21) over its own Players — the
+  // itemised GET /predictions stays for per-bet detail, but an Agent settling
+  // a game wants the per-number totals too.
   @Get('aggregate')
   @UseGuards(AccountTypesGuard)
-  @RequireAccountTypes('ADMIN', 'ADMIN_STAFF')
+  @RequireAccountTypes('ADMIN', 'ADMIN_STAFF', 'AGENT', 'AGENT_STAFF')
   aggregate(
     @Req() req: AuthenticatedRequest,
     @Query('gameId') gameId?: string,
@@ -50,7 +51,7 @@ export class PredictionsController {
     // rather than forcing one on the caller.
     @Query('agentId') agentId?: string | string[],
   ) {
-    return this.predictionsService.aggregateForAdmin(req.user!, {
+    return this.predictionsService.aggregate(req.user!, {
       gameId,
       date,
       agentIds: parseIdList(agentId),

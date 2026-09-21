@@ -96,15 +96,20 @@ export class PredictionsService {
    * id outside this Admin's subtree is simply dropped rather than erroring —
    * the "existence isn't information you're owed" rule the rest of the API
    * uses.
+   *
+   * An Agent (or its staff) gets the same book over its own Players only
+   * (2026-09-21): its scope is always exactly itself, so any `agentIds` it
+   * sends is ignored rather than honoured.
    */
-  async aggregateForAdmin(
+  async aggregate(
     requester: AuthenticatedUser,
     filters: { gameId?: string; date?: string; agentIds?: string[] },
   ) {
     const ownerId = resolveScopeOwnerId(requester);
-    const agentIds = await this.agentIdsOwnedBy(ownerId);
+    const isAgentTier = effectiveTier(requester) === 'AGENT';
+    const agentIds = isAgentTier ? [ownerId] : await this.agentIdsOwnedBy(ownerId);
 
-    const requested = filters.agentIds?.filter(Boolean) ?? [];
+    const requested = isAgentTier ? [] : (filters.agentIds?.filter(Boolean) ?? []);
     const scopedAgentIds = requested.length
       ? agentIds.filter((id) => requested.includes(id))
       : agentIds;
