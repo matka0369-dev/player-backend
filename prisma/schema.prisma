@@ -95,14 +95,23 @@ model User {
 
   rates Rate[] @relation("RateOwner")
 
-  roles           UserRole[]
-  sessions        Session[]
-  ledgerEntries   TokenLedgerEntry[] @relation("LedgerOwner")
-  grantsPerformed TokenLedgerEntry[] @relation("LedgerPerformedBy")
-  predictions     Prediction[]
-  gamesCreated    Game[]
-  gameEnablements GameEnablement[]
-  supportMessages SupportMessage[]
+  // An Agent's own WhatsApp number and the short code that identifies it in
+  // invite links (see PlayerAccessService). Both null on every other tier,
+  // and on an Agent who hasn't set them up yet.
+  whatsappNumber String? @map("whatsapp_number")
+  inviteCode     String? @unique @map("invite_code")
+
+  roles             UserRole[]
+  sessions          Session[]
+  loginTokens       LoginToken[]       @relation("LoginTokenSubject")
+  loginTokensIssued LoginToken[]       @relation("LoginTokenIssuer")
+  playerDevices     PlayerDevice[]
+  ledgerEntries     TokenLedgerEntry[] @relation("LedgerOwner")
+  grantsPerformed   TokenLedgerEntry[] @relation("LedgerPerformedBy")
+  predictions       Prediction[]
+  gamesCreated      Game[]
+  gameEnablements   GameEnablement[]
+  supportMessages   SupportMessage[]
 
   // Admin<->Agent settlement records this account appears in. Both sides
   // read the same row from opposite ends — see the Settlement model.
@@ -111,9 +120,9 @@ model User {
 
   resultCorrections ResultCorrection[] @relation("ResultCorrectionAuthor")
 
-  tokenRequests          TokenRequest[] @relation("TokenRequestRequester")
-  tokenRequestsClaimed   TokenRequest[] @relation("TokenRequestClaimant")
-  tokenRequestsResolved  TokenRequest[] @relation("TokenRequestResolver")
+  tokenRequests         TokenRequest[] @relation("TokenRequestRequester")
+  tokenRequestsClaimed  TokenRequest[] @relation("TokenRequestClaimant")
+  tokenRequestsResolved TokenRequest[] @relation("TokenRequestResolver")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -361,7 +370,6 @@ enum TokenRequestStatus {
 
 /**
  * A Player's request for their balance to change, and its review trail.
- *
  * Deliberately carries no attachment, no external reference number, and no
  * payout destination. A request is a message about tokens inside the system;
  * it is not evidence of anything happening outside it, and there is no field
@@ -369,7 +377,6 @@ enum TokenRequestStatus {
  * boundaries" — screenshots live on SupportMessage and are structurally
  * unrelated to the ledger, which is what keeps this from becoming an
  * offline-payment reconciliation workflow.
- *
  * `claimedById` exists for the multi-reviewer case: staff triaging a queue
  * need to see that someone else already picked a request up. It is advisory.
  * The real protection against a double-resolve is that resolution is a
@@ -385,7 +392,9 @@ model TokenRequest {
   status      TokenRequestStatus @default(PENDING)
   amount      Int
 
-  /** The Player's own words. Free text only — never a transaction reference. */
+  /**
+   * The Player's own words. Free text only — never a transaction reference.
+   */
   note String?
 
   // One optional image, shown to whichever reviewer already has this
@@ -436,6 +445,49 @@ model Session {
 
   @@index([userId])
   @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Player access — QR/link + PIN sign-in
+// ---------------------------------------------------------------------------
+
+// A one-time sign-in link an Agent issues for one of its own Players. Only the
+// SHA-256 of the token is stored (same reasoning as Session.tokenHash), it is
+// consumed exactly once, and it expires quickly — it is a bearer credential
+// that rides in a chat message, so the window is kept short on purpose.
+model LoginToken {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation("LoginTokenSubject", fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique @map("token_hash")
+  createdById String    @map("created_by_id")
+  createdBy   User      @relation("LoginTokenIssuer", fields: [createdById], references: [id])
+  expiresAt   DateTime  @map("expires_at")
+  usedAt      DateTime? @map("used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("login_tokens")
+}
+
+// One phone a Player has enrolled by redeeming a LoginToken. Signing in again
+// takes this device's key *and* the Player's PIN, so a 4-digit PIN is never
+// the only thing standing between a guessed username and an account: someone
+// without the key can neither sign in nor burn the PIN's attempts. Five wrong
+// PINs revoke the device and the Agent issues a fresh link.
+model PlayerDevice {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyHash        String    @map("key_hash")
+  pinHash        String    @map("pin_hash")
+  failedAttempts Int       @default(0) @map("failed_attempts")
+  revokedAt      DateTime? @map("revoked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  lastUsedAt     DateTime? @map("last_used_at")
+
+  @@index([userId])
+  @@map("player_devices")
 }
 
 // ---------------------------------------------------------------------------
@@ -623,15 +675,15 @@ model ResultCorrection {
   newClosePana      String? @map("new_close_pana")
 
   // Scale of the undo, captured before the re-grade overwrites it.
-  predictionsReset Int @map("predictions_reset")
-  payoutsReversed  Int @map("payouts_reversed")
+  predictionsReset     Int @map("predictions_reset")
+  payoutsReversed      Int @map("payouts_reversed")
   // How many accounts the clawback pushed below zero. Not an error — see
   // LedgerSource.RESULT_CORRECTION — but the number an operator most wants
   // to see, because those Players spent winnings they turned out not to have.
   accountsLeftNegative Int @map("accounts_left_negative")
 
-  performedById String @map("performed_by_id")
-  performedBy   User   @relation("ResultCorrectionAuthor", fields: [performedById], references: [id])
+  performedById String  @map("performed_by_id")
+  performedBy   User    @relation("ResultCorrectionAuthor", fields: [performedById], references: [id])
   reason        String?
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -764,7 +816,7 @@ model Settlement {
   totalPayout Int @map("total_payout")
   // totalStaked - totalPayout, from the Admin's side. The Agent's position is
   // exactly -net.
-  net Int
+  net         Int
 
   lines SettlementLine[]
 

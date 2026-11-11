@@ -599,6 +599,23 @@ export class UsersService {
   async forceLogoutScoped(id: string, requester: AuthenticatedUser) {
     await this.assertCanManageAccount(id, requester);
     await this.authService.revokeAllSessions(id);
+    // A Player's enrolled phones sign back in with a PIN, which would undo
+    // this the moment they next opened the app — "out everywhere" has to
+    // include them.
+    await this.prisma.playerDevice.updateMany({
+      where: { userId: id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  // The scope-and-permission check behind issuing a Player a new sign-in link
+  // (same rule as forcing them out), exposed so PlayerAccessService doesn't
+  // restate it.
+  async assertMayManagePlayerLogin(id: string, requester: AuthenticatedUser) {
+    const target = await this.assertCanManageAccount(id, requester);
+    if (target.accountType !== 'PLAYER') {
+      throw new BadRequestException('Sign-in links are only for Players');
+    }
   }
 
   // There is no assignAgent() here on purpose. A Player's agent is fixed at
