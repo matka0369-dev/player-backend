@@ -43,11 +43,12 @@ export class PlayerAccessService {
     private readonly authService: AuthService,
   ) {}
 
+  // Where a sign-in link points. Defaults to the deployed Player app rather
+  // than keying off NODE_ENV: a wrong guess there would put localhost links in
+  // every QR an Agent hands out, which fails silently on the player's phone.
+  // Local development opts in with PLAYER_APP_URL=http://localhost:5176.
   private playerAppUrl(): string {
-    return (
-      process.env.PLAYER_APP_URL ??
-      (process.env.NODE_ENV === 'production' ? 'https://player-alpha-rosy.vercel.app' : 'http://localhost:5176')
-    ).replace(/\/+$/, '');
+    return (process.env.PLAYER_APP_URL ?? 'https://player-alpha-rosy.vercel.app').replace(/\/+$/, '');
   }
 
   // Players belong to a native Agent only — AGENT_STAFF can't create them
