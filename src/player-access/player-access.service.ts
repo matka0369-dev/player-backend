@@ -107,8 +107,12 @@ export class PlayerAccessService {
 
     const writes: Array<{ purpose: ContactPurpose; number: string | null }> = [];
     for (const purpose of CONTACT_PURPOSES) {
-      if (!(purpose in input)) continue;
+      // `undefined` = left out = unchanged. Not `purpose in input`: the DTO is a
+      // class instance (transform: true) whose declared fields exist as own
+      // properties even when the request omitted them, so `in` was always true
+      // and sending only one number silently cleared the other.
       const raw = input[purpose];
+      if (raw === undefined) continue;
       writes.push({ purpose, number: raw == null || raw.trim() === '' ? null : normalizePhone(raw) });
     }
 
