@@ -4,11 +4,11 @@ import { AccountTypesGuard } from '../rbac/account-types.guard';
 import { RequireAccountTypes } from '../rbac/account-types.decorator';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { PlayerAccessService } from './player-access.service';
-import { InvitePlayerDto, SetWhatsappDto } from './dto/player-access.dto';
+import { InvitePlayerDto, SetContactsDto } from './dto/player-access.dto';
 
 /**
- * How an Agent brings a Player in and gets them back in: a WhatsApp number and
- * invite code the player app reads, and one-time sign-in links. Players redeem
+ * How an Agent brings a Player in and gets them back in: WhatsApp numbers (one per
+ * purpose) and an invite code the player app reads, and one-time sign-in links. Players redeem
  * those links with prediction-service (`POST /auth/enter`), not here — core
  * only ever *issues* them.
  */
@@ -23,10 +23,10 @@ export class PlayerAccessController {
     return this.service.myInvite(req.user!);
   }
 
-  @Put('me')
+  @Put('me/contacts')
   @RequireAccountTypes('AGENT')
-  setWhatsapp(@Body() dto: SetWhatsappDto, @Req() req: AuthenticatedRequest) {
-    return this.service.setWhatsapp(req.user!, dto.whatsappNumber);
+  setContacts(@Body() dto: SetContactsDto, @Req() req: AuthenticatedRequest) {
+    return this.service.setContacts(req.user!, dto);
   }
 
   @Post('players')

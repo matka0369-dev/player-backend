@@ -98,8 +98,13 @@ model User {
   // An Agent's own WhatsApp number and the short code that identifies it in
   // invite links (see PlayerAccessService). Both null on every other tier,
   // and on an Agent who hasn't set them up yet.
-  whatsappNumber String? @map("whatsapp_number")
-  inviteCode     String? @unique @map("invite_code")
+  //
+  // whatsappNumber is the original single number and is no longer read or
+  // written — numbers now live per purpose in agent_contacts (backfilled from
+  // this column). Kept until a later migration drops it.
+  whatsappNumber String?         @map("whatsapp_number")
+  inviteCode     String?         @unique @map("invite_code")
+  contacts       AgentContact[]
 
   roles             UserRole[]
   sessions          Session[]
@@ -455,6 +460,23 @@ model Session {
 // SHA-256 of the token is stored (same reasoning as Session.tokenHash), it is
 // consumed exactly once, and it expires quickly — it is a bearer credential
 // that rides in a chat message, so the window is kept short on purpose.
+// WhatsApp numbers an Agent publishes to its Players, one per purpose
+// ("support", "tokens"). The player app shows the right chat button where the
+// player needs it. Purposes are plain text so adding one is a code change, not
+// a migration; see CONTACT_PURPOSES in PlayerAccessService.
+model AgentContact {
+  id             String   @id @default(uuid())
+  agentId        String   @map("agent_id")
+  agent          User     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  purpose        String
+  whatsappNumber String   @map("whatsapp_number")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([agentId, purpose])
+  @@map("agent_contacts")
+}
+
 model LoginToken {
   id          String    @id @default(uuid())
   userId      String    @map("user_id")

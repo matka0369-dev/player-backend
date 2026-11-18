@@ -24,6 +24,12 @@ function randomCode(): string {
   return out;
 }
 
+/** What an Agent can publish a WhatsApp number for. The player app decides
+ *  where each shows up; "tokens" falls back to "support" when unset. */
+export const CONTACT_PURPOSES = ['support', 'tokens'] as const;
+export type ContactPurpose = (typeof CONTACT_PURPOSES)[number];
+export type ContactsInput = Partial<Record<ContactPurpose, string | null>>;
+
 /** Digits only, country code included — the shape wa.me links need. */
 export function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, '');
@@ -64,7 +70,7 @@ export class PlayerAccessService {
     this.assertNativeAgent(requester);
     const me = await this.prisma.user.findUniqueOrThrow({
       where: { id: requester.id },
-      select: { whatsappNumber: true, inviteCode: true },
+      select: { inviteCode: true, contacts: { select: { purpose: true, whatsappNumber: true } } },
     });
 
     let code = me.inviteCode;
@@ -79,19 +85,42 @@ export class PlayerAccessService {
     }
     if (!code) throw new BadRequestException('Could not create an invite code, please retry');
 
-    return {
-      whatsappNumber: me.whatsappNumber,
-      inviteCode: code,
-      inviteUrl: `${this.playerAppUrl()}/join/${code}`,
-    };
+    const contacts: Record<ContactPurpose, string | null> = { support: null, tokens: null };
+    for (const c of me.contacts) {
+      if ((CONTACT_PURPOSES as readonly string[]).includes(c.purpose)) {
+        contacts[c.purpose as ContactPurpose] = c.whatsappNumber;
+      }
+    }
+
+    return { contacts, inviteCode: code, inviteUrl: `${this.playerAppUrl()}/join/${code}` };
   }
 
-  async setWhatsapp(requester: AuthenticatedUser, raw: string) {
+  /**
+   * Set or clear the Agent's numbers. A purpose left out of `input` is
+   * untouched; null (or empty) clears it. Each number is validated like any
+   * phone — digits with country code — before anything is written.
+   */
+  async setContacts(requester: AuthenticatedUser, input: ContactsInput) {
     this.assertNativeAgent(requester);
-    await this.prisma.user.update({
-      where: { id: requester.id },
-      data: { whatsappNumber: normalizePhone(raw) },
-    });
+
+    const writes: Array<{ purpose: ContactPurpose; number: string | null }> = [];
+    for (const purpose of CONTACT_PURPOSES) {
+      if (!(purpose in input)) continue;
+      const raw = input[purpose];
+      writes.push({ purpose, number: raw == null || raw.trim() === '' ? null : normalizePhone(raw) });
+    }
+
+    await this.prisma.$transaction(
+      writes.map(({ purpose, number }) =>
+        number === null
+          ? this.prisma.agentContact.deleteMany({ where: { agentId: requester.id, purpose } })
+          : this.prisma.agentContact.upsert({
+              where: { agentId_purpose: { agentId: requester.id, purpose } },
+              create: { agentId: requester.id, purpose, whatsappNumber: number },
+              update: { whatsappNumber: number },
+            }),
+      ),
+    );
     return this.myInvite(requester);
   }
 
