@@ -37,6 +37,15 @@ export class RequestsController {
     return this.requestsService.mine(req.user!);
   }
 
+  // Registered before ':id/...' routes. Finds a request from the code in a
+  // pasted WhatsApp message.
+  @Get('lookup')
+  @UseGuards(AccountTypesGuard)
+  @RequireAccountTypes('AGENT', 'AGENT_STAFF', 'ADMIN', 'ADMIN_STAFF')
+  lookup(@Query('code') code: string, @Req() req: AuthenticatedRequest) {
+    return this.requestsService.lookup(code ?? '', req.user!);
+  }
+
   // Every tier that can ever see a request at all — the service is what
   // actually narrows this to "your own, or one already in your scope."
   @Get(':id/image')

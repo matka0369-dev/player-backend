@@ -13,6 +13,7 @@ import { LedgerModule } from './ledger/ledger.module';
 import { GamesModule } from './games/games.module';
 import { PredictionsModule } from './predictions/predictions.module';
 import { RequestsModule } from './requests/requests.module';
+import { AuditModule } from './audit/audit.module';
 import { PlayerAccessModule } from './player-access/player-access.module';
 
 @Module({
@@ -30,6 +31,7 @@ import { PlayerAccessModule } from './player-access/player-access.module';
     PredictionsModule,
     RequestsModule,
     PlayerAccessModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [AppService],

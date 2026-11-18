@@ -4,7 +4,7 @@ import { AccountTypesGuard } from '../rbac/account-types.guard';
 import { RequireAccountTypes } from '../rbac/account-types.decorator';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { PlayerAccessService } from './player-access.service';
-import { InvitePlayerDto, SetContactsDto } from './dto/player-access.dto';
+import { SetContactsDto } from './dto/player-access.dto';
 
 /**
  * How an Agent brings a Player in and gets them back in: WhatsApp numbers (one per
@@ -27,12 +27,6 @@ export class PlayerAccessController {
   @RequireAccountTypes('AGENT')
   setContacts(@Body() dto: SetContactsDto, @Req() req: AuthenticatedRequest) {
     return this.service.setContacts(req.user!, dto);
-  }
-
-  @Post('players')
-  @RequireAccountTypes('AGENT')
-  invite(@Body() dto: InvitePlayerDto, @Req() req: AuthenticatedRequest) {
-    return this.service.invitePlayer(req.user!, dto);
   }
 
   @Post(':id/login-link')

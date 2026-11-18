@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
 import { AccountType, AuthenticatedUser } from '../auth/auth.types';
@@ -32,6 +33,8 @@ const userSummarySelect = {
   // ownership rather than making callers resolve ids themselves.
   createdBy: { select: { id: true, username: true, accountType: true } },
   agent: { select: { id: true, username: true } },
+  // Staff roles, so a roster can show and edit them without a call per row.
+  roles: { select: { role: { select: { id: true, name: true } } } },
 } as const;
 
 @Injectable()
@@ -41,6 +44,7 @@ export class UsersService {
     private readonly authService: AuthService,
     private readonly ratesService: RatesService,
     private readonly ledgerService: LedgerService,
+    private readonly audit: AuditService,
   ) {}
 
   // The ids of every Agent belonging to an Admin. `createdById` is the
@@ -255,13 +259,21 @@ export class UsersService {
         throw new ForbiddenException(`Missing required permission: ${PERMISSIONS.AGENT_MANAGE}`);
       }
     } else if (requester.accountType === 'AGENT') {
-      // Intrinsic, same as an Admin creating an Agent — a native Agent's
-      // Players are its own, the same way its authority to moderate them
-      // already was. Notably absent: AGENT_STAFF also creating Players —
-      // that stays a native-tier-only capability, matching how staff never
-      // get account-creation authority anywhere else in this hierarchy.
-      if (dto.accountType !== 'AGENT_STAFF' && dto.accountType !== 'PLAYER') {
-        throw new ForbiddenException('Agent may only create Player or Agent-staff accounts');
+      // The owner Agent hires employees; it does not create players itself
+      // (2026-11-18). Players sign themselves up in the app, or are created by
+      // an employee holding player:create — so every account creation is tied
+      // to a named person in the audit log.
+      if (dto.accountType !== 'AGENT_STAFF') {
+        throw new ForbiddenException(
+          'An agent creates staff accounts; players are created by a staff member with the player:create role',
+        );
+      }
+    } else if (requester.accountType === 'AGENT_STAFF') {
+      if (dto.accountType !== 'PLAYER') {
+        throw new ForbiddenException('Agent staff may only create Player accounts');
+      }
+      if (!requester.permissions.includes(PERMISSIONS.PLAYER_CREATE)) {
+        throw new ForbiddenException(`Missing required permission: ${PERMISSIONS.PLAYER_CREATE}`);
       }
     } else {
       throw new ForbiddenException('Not permitted to create accounts');
@@ -355,8 +367,15 @@ export class UsersService {
     // types from what the Player can even see. Either way, that's exactly
     // the ambiguity this option exists to remove.
     if (dto.rates !== undefined) {
-      if (dto.accountType !== 'AGENT' && dto.accountType !== 'PLAYER') {
-        throw new BadRequestException('rates is only meaningful when creating an AGENT or PLAYER');
+      if (dto.accountType === 'PLAYER') {
+        // One rate card per Agent, shared by all its Players. A per-Player
+        // card would make the Agent's consolidated bet totals incomparable.
+        throw new BadRequestException(
+          'Players cannot have their own rates: every player plays at their agent\'s rate card',
+        );
+      }
+      if (dto.accountType !== 'AGENT') {
+        throw new BadRequestException('rates is only meaningful when creating an AGENT');
       }
       const seen = new Set(dto.rates.map((r) => r.betType));
       if (seen.size !== dto.rates.length) {
@@ -386,9 +405,15 @@ export class UsersService {
     // Agent of the same Admin. Every other tier (Admin, Agent, staff) keeps
     // the old platform-wide check; those are core operator accounts, not
     // Players, and a collision there has bigger consequences.
+    // The Admin whose subtree this lands in: an Agent's creator, which for a
+    // staff member acting for that Agent means one more hop up.
+    const scopeAdminId =
+      dto.accountType === 'PLAYER'
+        ? (await this.prisma.user.findUniqueOrThrow({ where: { id: ownerId }, select: { createdById: true } })).createdById!
+        : null;
     const emailScope: Prisma.UserWhereInput =
       dto.accountType === 'PLAYER'
-        ? { accountType: 'PLAYER', agentId: { in: await this.agentIdsOwnedBy(requester.createdById!) } }
+        ? { accountType: 'PLAYER', agentId: { in: await this.agentIdsOwnedBy(scopeAdminId!) } }
         : {};
     const emailClash = await this.prisma.user.findFirst({
       where: { ...emailScope, email: dto.email },
@@ -430,12 +455,13 @@ export class UsersService {
         await this.ratesService.seedAdminDefaultCard(tx, user.id);
       } else if (dto.accountType === 'AGENT') {
         await this.ratesService.seedAgentCardsFrom(tx, user.id, ownerId, dto.rates);
-      } else if (dto.accountType === 'PLAYER' && dto.rates) {
-        // Left unset, a Player has no PLAYING rows at all and reads its
-        // Agent's GIVING card live (see RatesService.myCards) — the common
-        // case needs nothing here.
-        await this.ratesService.seedPlayerCardFrom(tx, user.id, ownerId, dto.rates);
       }
+
+      await this.audit.record(
+        requester,
+        { action: 'user.create', targetUserId: user.id, meta: { accountType: dto.accountType, username: dto.username } },
+        tx,
+      );
 
       if (dto.openingBalance !== undefined) {
         await this.ledgerService.grantOpeningBalance(tx, {
@@ -578,6 +604,12 @@ export class UsersService {
         });
       }
 
+      await this.audit.record(
+        requester,
+        { action: isActive ? 'user.enable' : 'user.disable', targetUserId: id },
+        tx,
+      );
+
       return tx.user.update({
         where: { id },
         // Acting on this account directly clears the marker either way: it is
@@ -606,6 +638,7 @@ export class UsersService {
       where: { userId: id, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    await this.audit.record(requester, { action: 'user.force_logout', targetUserId: id });
   }
 
   // The scope-and-permission check behind issuing a Player a new sign-in link

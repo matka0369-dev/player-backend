@@ -1,5 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { LedgerSource, LedgerWallet, Prisma } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
+import { assertMayViewPredictionData } from '../rbac/view-guard.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { PERMISSIONS } from '../rbac/permissions.constants';
@@ -23,7 +25,10 @@ function utcDayRange(date: string): { gte: Date; lt: Date } {
 
 @Injectable()
 export class LedgerService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * The one way a balance is ever allowed to move.
@@ -257,21 +262,28 @@ export class LedgerService {
    * in this hierarchy, and an Agent's own wallet is the last place to start.
    */
   private async assertCanTransfer(playerId: string, requester: AuthenticatedUser) {
-    if (requester.accountType !== 'AGENT') {
-      throw new ForbiddenException('Only an Agent may transfer tokens to its own players');
+    // Moving the Agent's tokens is an employee duty (2026-11-18): the owner
+    // Agent account delegates it to staff holding token:transfer, so each
+    // movement names a person. The tokens themselves stay the Agent's —
+    // `ownerId` below is whose wallet the staff member is spending.
+    if (requester.accountType !== 'AGENT_STAFF') {
+      throw new ForbiddenException(
+        'Moving tokens needs a staff account with the Finance role (token:transfer) — the agent account itself cannot',
+      );
     }
-    if (playerId === requester.id) {
-      throw new ForbiddenException('An account cannot transfer to itself');
+    if (!requester.permissions.includes(PERMISSIONS.TOKEN_TRANSFER)) {
+      throw new ForbiddenException(`Missing required permission: ${PERMISSIONS.TOKEN_TRANSFER}`);
     }
+    const ownerId = resolveScopeOwnerId(requester);
 
     // 404 rather than 403 for someone else's Player, matching the rest of the
     // API — existence isn't information the caller is owed.
     const player = await this.prisma.user.findFirst({
-      where: { id: playerId, accountType: 'PLAYER', agentId: requester.id },
+      where: { id: playerId, accountType: 'PLAYER', agentId: ownerId },
       select: { id: true, username: true },
     });
     if (!player) throw new NotFoundException('Player not found');
-    return player;
+    return { ...player, ownerId };
   }
 
   /**
@@ -303,7 +315,7 @@ export class LedgerService {
       throw new BadRequestException(`A single transfer cannot exceed ${MAX_GRANT}`);
     }
 
-    const [fromId, toId] = delta > 0 ? [requester.id, playerId] : [playerId, requester.id];
+    const [fromId, toId] = delta > 0 ? [player.ownerId, playerId] : [playerId, player.ownerId];
     const amount = Math.abs(delta);
     const defaultNote =
       delta > 0 ? `Transfer to ${player.username}` : `Reclaimed from ${player.username}`;
@@ -319,13 +331,19 @@ export class LedgerService {
         note: note ?? defaultNote,
       });
 
-      return this.applyDelta(tx, {
+      const credit = await this.applyDelta(tx, {
         userId: toId,
         delta: amount,
         source: LedgerSource.AGENT_TRANSFER,
         performedById: requester.id,
         note: note ?? defaultNote,
       });
+      await this.audit.record(
+        requester,
+        { action: 'tokens.transfer', targetUserId: playerId, meta: { delta, note: note ?? null } },
+        tx,
+      );
+      return credit;
     });
   }
 
@@ -405,6 +423,21 @@ export class LedgerService {
     return this.assertCanFund(targetId, requester);
   }
 
+  /**
+   * The wallet an Agent's team spends from. An Agent's employees cannot read
+   * the Agent's own user row, but the one who moves tokens needs the balance.
+   */
+  async agentWallet(requester: AuthenticatedUser) {
+    if (effectiveTier(requester) !== 'AGENT') {
+      throw new ForbiddenException('Only an Agent and its staff have an agent wallet');
+    }
+    const w = await this.prisma.user.findUniqueOrThrow({
+      where: { id: resolveScopeOwnerId(requester) },
+      select: { balance: true, winningsBalance: true },
+    });
+    return w;
+  }
+
   /** Ad-hoc grant to an existing in-scope account. */
   async grant(
     targetId: string,
@@ -416,15 +449,17 @@ export class LedgerService {
     if (amount <= 0) throw new BadRequestException('Grant must be greater than zero');
     if (amount > MAX_GRANT) throw new BadRequestException(`Grant cannot exceed ${MAX_GRANT}`);
 
-    return this.prisma.$transaction((tx) =>
-      this.applyDelta(tx, {
+    return this.prisma.$transaction(async (tx) => {
+      const entry = await this.applyDelta(tx, {
         userId: targetId,
         delta: amount,
         source: LedgerSource.ADMIN_GRANT,
         performedById: requester.id,
         note,
-      }),
-    );
+      });
+      await this.audit.record(requester, { action: 'tokens.grant', targetUserId: targetId, meta: { amount, note: note ?? null } }, tx);
+      return entry;
+    });
   }
 
   /**
@@ -443,6 +478,7 @@ export class LedgerService {
       agentId?: string;
     },
   ) {
+    assertMayViewPredictionData(requester);
     const ownerId = resolveScopeOwnerId(requester);
     const tier = effectiveTier(requester);
 

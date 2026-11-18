@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { ADMIN_ASSIGNABLE_PERMISSIONS, AGENT_STAFF_ALLOWED_PERMISSIONS, PermissionKey } from '../rbac/permissions.constants';
@@ -6,7 +7,10 @@ import { CreateRoleDto } from './dto/create-role.dto';
 
 @Injectable()
 export class RolesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   listRoles() {
     return this.prisma.role.findMany({
@@ -71,6 +75,7 @@ export class RolesService {
       update: {},
       create: { userId: user.id, roleId },
     });
+    await this.audit.record(requester, { action: 'role.assign', targetUserId: user.id, meta: { role: role.name } });
 
     return this.getUserRoles(user.id);
   }
@@ -79,6 +84,7 @@ export class RolesService {
     const user = await this.assertCanAssignRoleTo(userId, requester);
 
     await this.prisma.userRole.deleteMany({ where: { userId: user.id, roleId } });
+    await this.audit.record(requester, { action: 'role.unassign', targetUserId: user.id, meta: { roleId } });
     return this.getUserRoles(user.id);
   }
 

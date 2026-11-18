@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { BetType, Prisma, RateKind } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { PERMISSIONS } from '../rbac/permissions.constants';
@@ -11,7 +12,10 @@ type Tx = Prisma.TransactionClient;
 
 @Injectable()
 export class RatesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   // ---------------------------------------------------------------------
   // Seeding — called from account creation, inside that same transaction
@@ -70,29 +74,6 @@ export class RatesService {
     });
   }
 
-  /**
-   * A Player's own override card — priced explicitly by its Agent at
-   * creation, rather than riding the Agent's GIVING card live. Optional:
-   * called only when the Agent supplied one.
-   *
-   * **Revision 2026-08-05 (explicit sign-off): no longer capped by the
-   * Agent's GIVING card**, for the same reason `updateGivingCard` isn't
-   * capped by GIVEN — an Agent may price a Player better than its own
-   * standard rate and carry the difference itself. See that method for the
-   * full reasoning.
-   */
-  async seedPlayerCardFrom(tx: Tx, playerId: string, agentId: string, overrides: RateEntryDto[]) {
-
-    await tx.rate.createMany({
-      data: overrides.map(({ betType, multiplier }) => ({
-        ownerId: playerId,
-        kind: RateKind.PLAYING,
-        betType,
-        multiplier,
-      })),
-    });
-  }
-
   // ---------------------------------------------------------------------
   // Reads
   // ---------------------------------------------------------------------
@@ -109,10 +90,11 @@ export class RatesService {
    * The cards the caller is entitled to see, shaped by tier:
    * - Admin: its own DEFAULT template.
    * - Agent: GIVEN (read-only, set by its Admin) and GIVING (its own).
-   * - Player: its own PLAYING override if its Agent set one at creation,
-   *   otherwise the GIVING card of the Agent it sits under, read live — the
-   *   rates it actually plays at either way. A Player never sees anything
-   *   upstream of that.
+   * - Player: the GIVING card of the Agent it sits under, read live. Every
+   *   Player of an Agent plays at exactly that card — there are no per-Player
+   *   rates (removed 2026-11-18: one rate per Agent keeps consolidated bet
+   *   totals comparable; a Player wanting a different rate belongs to a
+   *   different Agent). A Player never sees anything upstream of that.
    * - Platform Admin: nothing. It has no rate authority anywhere.
    */
   async myCards(requester: AuthenticatedUser) {
@@ -131,10 +113,9 @@ export class RatesService {
 
       case 'PLAYER': {
         if (!requester.agentId) return { kind: 'PLAYER' as const, playing: [] };
-        const own = await this.cardFor(ownerId, RateKind.PLAYING);
         return {
           kind: 'PLAYER' as const,
-          playing: own.length ? own : await this.cardFor(requester.agentId, RateKind.GIVING),
+          playing: await this.cardFor(requester.agentId, RateKind.GIVING),
         };
       }
 
@@ -238,6 +219,8 @@ export class RatesService {
       throw new ForbiddenException('Only an Agent has a giving rate card');
     }
     this.assertCanEditOwnCard(requester);
-    return this.upsertCard(resolveScopeOwnerId(requester), RateKind.GIVING, entries);
+    const card = await this.upsertCard(resolveScopeOwnerId(requester), RateKind.GIVING, entries);
+    await this.audit.record(requester, { action: 'rates.update_giving', meta: { entries } });
+    return card;
   }
 }

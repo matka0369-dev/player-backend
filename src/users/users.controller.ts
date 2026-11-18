@@ -22,7 +22,7 @@ export class UsersController {
   // nothing.
   @Post()
   @UseGuards(AccountTypesGuard)
-  @RequireAccountTypes('PLATFORM_ADMIN', 'ADMIN', 'ADMIN_STAFF', 'AGENT')
+  @RequireAccountTypes('PLATFORM_ADMIN', 'ADMIN', 'ADMIN_STAFF', 'AGENT', 'AGENT_STAFF')
   create(@Body() dto: CreateUserDto, @Req() req: AuthenticatedRequest) {
     return this.usersService.create(dto, req.user!);
   }
@@ -37,7 +37,7 @@ export class UsersController {
   // Same tiers as POST /users, above, for the same reason.
   @Get('check-username')
   @UseGuards(AccountTypesGuard)
-  @RequireAccountTypes('PLATFORM_ADMIN', 'ADMIN', 'ADMIN_STAFF', 'AGENT')
+  @RequireAccountTypes('PLATFORM_ADMIN', 'ADMIN', 'ADMIN_STAFF', 'AGENT', 'AGENT_STAFF')
   async checkUsername(@Query() query: CheckUsernameDto) {
     const available = await this.usersService.isUsernameAvailable(query.username);
     return { available };

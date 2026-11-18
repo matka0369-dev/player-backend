@@ -7,17 +7,20 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { LedgerSource, Prisma, TokenRequestKind, TokenRequestStatus } from '@prisma/client';
+import { LedgerSource, LedgerWallet, Prisma, TokenRequestKind, TokenRequestStatus } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { effectiveTier, resolveScopeOwnerId } from '../rbac/scope.util';
 import { CreateTokenRequestDto, ResolveTokenRequestDto } from './dto/create-request.dto';
+import { generateShortCode, normalizeShortCode } from './short-code.util';
 import { IMAGE_RETENTION_MS, parseImageDataUrl } from './image-data-url.util';
 
 const requestSelect = {
   id: true,
+  shortCode: true,
   kind: true,
   status: true,
   amount: true,
@@ -43,6 +46,7 @@ export class RequestsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledgerService: LedgerService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -68,7 +72,7 @@ export class RequestsService {
     // than after a reviewer has spent time on it. Re-checked at approval,
     // which is the moment that actually matters — the balance can move in
     // between, and the ledger's own guard is the authority either way.
-    if (dto.kind === TokenRequestKind.SURRENDER) {
+    if (dto.kind === TokenRequestKind.SURRENDER || dto.kind === TokenRequestKind.RETURN) {
       const held = player.balance + player.winningsBalance;
       if (dto.amount > held) {
         throw new BadRequestException(`You only hold ${held} tokens`);
@@ -87,9 +91,28 @@ export class RequestsService {
     // process boundary in between.
     const image = dto.image ? parseImageDataUrl(dto.image) : null;
 
+    // A clash on the short code is astronomically unlikely, but it is a unique
+    // index — retry rather than surface a 500 the Player can do nothing about.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.createRow(dto, requester.id, image, generateShortCode());
+      } catch (e) {
+        const clash = e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002' && String(e.meta?.target).includes('short_code');
+        if (!clash || attempt >= 4) throw e;
+      }
+    }
+  }
+
+  private createRow(
+    dto: CreateTokenRequestDto,
+    requesterId: string,
+    image: ReturnType<typeof parseImageDataUrl>,
+    shortCode: string,
+  ) {
     return this.prisma.tokenRequest.create({
       data: {
-        requesterId: requester.id,
+        requesterId,
+        shortCode,
         kind: dto.kind,
         amount: dto.amount,
         note: dto.note,
@@ -182,6 +205,7 @@ export class RequestsService {
     if (done.count === 0) {
       throw new ConflictException('Someone else is already working on that request');
     }
+    await this.audit.record(requester, { action: 'request.claim', targetType: 'token_request', targetId: id });
     return this.prisma.tokenRequest.findUniqueOrThrow({ where: { id }, select: requestSelect });
   }
 
@@ -214,7 +238,10 @@ export class RequestsService {
       },
     });
     if (done.count === 0) throw new ConflictException('That request is no longer pending');
-    void req;
+    await this.audit.record(requester, {
+      action: 'request.reject', targetUserId: req.requester.id, targetType: 'token_request', targetId: id,
+      meta: { kind: req.kind, amount: req.amount },
+    });
     return this.prisma.tokenRequest.findUniqueOrThrow({ where: { id }, select: requestSelect });
   }
 
@@ -238,14 +265,26 @@ export class RequestsService {
       throw new ConflictException('That request has already been resolved');
     }
 
-    // Staff triage; they never approve. Stated as its own check with its own
-    // message so a Request Manager hitting this understands the boundary
-    // rather than reading it as a missing role.
-    if (requester.accountType === 'AGENT_STAFF' || requester.accountType === 'ADMIN_STAFF') {
+    // Who may approve: an Agent's top-up is approved by an Agent *employee*
+    // holding request:approve (2026-11-18) — never the owner account, so the
+    // approval is attributable. A surrender is the native Admin's alone.
+    if (requester.accountType === 'ADMIN_STAFF') {
+      throw new ForbiddenException('Admin staff can claim and reject requests; approving is the Admin\'s alone');
+    }
+    if (requester.accountType === 'AGENT') {
       throw new ForbiddenException(
-        'Staff can claim and reject requests, but approving moves tokens — that is the account holder\'s alone',
+        'Approving moves the agent\'s tokens, so it needs a staff account with the Finance role (request:approve)',
       );
     }
+    if (requester.accountType === 'AGENT_STAFF') {
+      if (!requester.permissions.includes(PERMISSIONS.REQUEST_APPROVE)) {
+        throw new ForbiddenException(`Missing required permission: ${PERMISSIONS.REQUEST_APPROVE}`);
+      }
+      if (req.kind === TokenRequestKind.SURRENDER) {
+        throw new ForbiddenException('Only an Admin approves a surrender');
+      }
+    }
+    const ownerId = resolveScopeOwnerId(requester);
 
     return this.prisma.$transaction(async (tx) => {
       // Claim the row first. Everything below only runs for the caller that
@@ -266,8 +305,8 @@ export class RequestsService {
       let entryId: string;
 
       if (req.kind === TokenRequestKind.TOP_UP) {
-        if (requester.accountType !== 'AGENT' || req.requester.agentId !== requester.id) {
-          throw new ForbiddenException('Only this Player\'s own Agent may approve a top-up');
+        if (requester.accountType !== 'AGENT_STAFF' || req.requester.agentId !== ownerId) {
+          throw new ForbiddenException('Only this Player\'s own Agent\'s staff may approve a top-up');
         }
         // Both legs of the paired transfer, inside this transaction: the
         // Agent's wallet down, the Player's up. applyDelta's overdraft guard
@@ -275,7 +314,7 @@ export class RequestsService {
         // holds — and because it runs here, failing rolls back the approval
         // too rather than leaving a request marked APPROVED with no movement.
         await this.ledgerService.applyDelta(tx, {
-          userId: requester.id,
+          userId: ownerId,
           delta: -req.amount,
           source: LedgerSource.AGENT_TRANSFER,
           performedById: requester.id,
@@ -287,6 +326,41 @@ export class RequestsService {
           source: LedgerSource.AGENT_TRANSFER,
           performedById: requester.id,
           note: dto.resolutionNote ?? 'Approved top-up request',
+        });
+        entryId = credit.id;
+      } else if (req.kind === TokenRequestKind.RETURN) {
+        // The Player gives tokens back to its own Agent. Same staff gate as a
+        // top-up; the movement is the mirror image.
+        if (requester.accountType !== 'AGENT_STAFF' || req.requester.agentId !== ownerId) {
+          throw new ForbiddenException('Only this Player\'s own Agent\'s staff may approve a return');
+        }
+        const held = await tx.user.findUniqueOrThrow({
+          where: { id: req.requester.id },
+          select: { balance: true, winningsBalance: true },
+        });
+        if (held.balance + held.winningsBalance < req.amount) {
+          throw new ConflictException('The player no longer holds that many tokens');
+        }
+        // Main wallet first, then winnings — the same order stakes draw down.
+        const fromMain = Math.min(Math.max(held.balance, 0), req.amount);
+        const fromWinnings = req.amount - fromMain;
+        const note = dto.resolutionNote ?? `Returned to agent (request ${req.requester.username})`;
+        if (fromMain > 0) {
+          await this.ledgerService.applyDelta(tx, {
+            userId: req.requester.id, delta: -fromMain, wallet: LedgerWallet.MAIN,
+            source: LedgerSource.AGENT_TRANSFER, performedById: requester.id, note,
+          });
+        }
+        if (fromWinnings > 0) {
+          await this.ledgerService.applyDelta(tx, {
+            userId: req.requester.id, delta: -fromWinnings, wallet: LedgerWallet.WINNINGS,
+            source: LedgerSource.AGENT_TRANSFER, performedById: requester.id, note,
+          });
+        }
+        const credit = await this.ledgerService.applyDelta(tx, {
+          userId: ownerId, delta: req.amount, wallet: LedgerWallet.MAIN,
+          source: LedgerSource.AGENT_TRANSFER, performedById: requester.id,
+          note: `Return from ${req.requester.username}`,
         });
         entryId = credit.id;
       } else {
@@ -302,8 +376,35 @@ export class RequestsService {
       }
 
       await tx.tokenRequest.update({ where: { id }, data: { ledgerEntryId: entryId } });
+      await this.audit.record(
+        requester,
+        { action: 'request.approve', targetUserId: req.requester.id, targetType: 'token_request', targetId: id, meta: { kind: req.kind, amount: req.amount } },
+        tx,
+      );
       return tx.tokenRequest.findUniqueOrThrow({ where: { id }, select: requestSelect });
     });
+  }
+
+  /**
+   * Find a request by the short code a Player's WhatsApp message carries.
+   * Only the code locates it: the stored row is the truth, and nothing from
+   * the pasted text (amount, kind) is trusted. 404 for a code outside the
+   * caller's scope, same as every other lookup here.
+   */
+  async lookup(code: string, requester: AuthenticatedUser) {
+    const tier = effectiveTier(requester);
+    if (tier !== 'AGENT' && tier !== 'ADMIN') {
+      throw new ForbiddenException('Your account type cannot review token requests');
+    }
+    this.assertMayTriage(requester);
+    const found = await this.prisma.tokenRequest.findUnique({
+      where: { shortCode: normalizeShortCode(code) },
+      select: requestSelect,
+    });
+    if (!found || !(await this.isInReviewerScope(found.requester.agentId, requester))) {
+      throw new NotFoundException('No request with that code in your queue');
+    }
+    return found;
   }
 
   /**

@@ -13,7 +13,9 @@ import {
 import { MAX_GRANT } from '../../ledger/ledger.service';
 import { parseImageDataUrl } from '../image-data-url.util';
 
-const KINDS = ['TOP_UP', 'SURRENDER'] as const;
+// SURRENDER (burn, Admin-approved) stays valid for old clients; the Player app
+// now offers TOP_UP and RETURN.
+const KINDS = ['TOP_UP', 'SURRENDER', 'RETURN'] as const;
 
 @ValidatorConstraint({ name: 'isImageDataUrl', async: false })
 class IsImageDataUrl implements ValidatorConstraintInterface {

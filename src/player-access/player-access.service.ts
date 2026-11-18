@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
 import { AuthenticatedUser } from '../auth/auth.types';
@@ -47,6 +48,7 @@ export class PlayerAccessService {
     private readonly prisma: PrismaService,
     private readonly usersService: UsersService,
     private readonly authService: AuthService,
+    private readonly audit: AuditService,
   ) {}
 
   // Where a sign-in link points. Defaults to the deployed Player app rather
@@ -121,47 +123,8 @@ export class PlayerAccessService {
             }),
       ),
     );
+    await this.audit.record(requester, { action: 'contacts.update', meta: { purposes: writes.map((w) => w.purpose) } });
     return this.myInvite(requester);
-  }
-
-  /**
-   * Create a Player from a WhatsApp registration request and issue its first
-   * sign-in link in one step.
-   *
-   * Goes through UsersService.create, not around it, so a Player made this way
-   * gets exactly the same checks as one made from the create form: it lands in
-   * this Agent's subtree, reads this Agent's rate card, and the phone-number
-   * uniqueness rule applies. The only difference is the password: nobody
-   * types one, so it's a random value nobody ever sees — the Player gets in
-   * through the link and then their own PIN.
-   */
-  async invitePlayer(requester: AuthenticatedUser, input: { phone: string; username?: string }) {
-    this.assertNativeAgent(requester);
-    const phone = normalizePhone(input.phone);
-
-    const base = input.username ?? `p${phone.slice(-10)}`;
-    let username = base;
-    for (let attempt = 0; ; attempt++) {
-      const clash = await this.prisma.user.findFirst({ where: { username }, select: { id: true } });
-      if (!clash) break;
-      // An explicit username that's taken is the Agent's to resolve; a derived
-      // one just gets a short suffix.
-      if (input.username || attempt >= 4) throw new BadRequestException('That username is already taken');
-      username = `${base}${Math.floor(10 + Math.random() * 90)}`;
-    }
-
-    const user = await this.usersService.create(
-      {
-        email: phone,
-        username,
-        password: randomBytes(24).toString('hex'),
-        accountType: 'PLAYER',
-      } as CreateUserDto,
-      requester,
-    );
-
-    const link = await this.issueLink(user.id);
-    return { user, ...link };
   }
 
   /**
@@ -176,7 +139,9 @@ export class PlayerAccessService {
     // Agent, or its staff holding moderation:manage.
     await this.usersService.assertMayManagePlayerLogin(playerId, requester);
     await this.authService.revokeAllSessions(playerId);
-    return this.issueLink(playerId, { revokeDevices: true });
+    const link = await this.issueLink(playerId, { revokeDevices: true });
+    await this.audit.record(requester, { action: 'player.new_link', targetUserId: playerId });
+    return link;
   }
 
   private async issueLink(userId: string, opts: { revokeDevices?: boolean } = {}) {

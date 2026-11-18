@@ -285,7 +285,10 @@ export class ResultsService {
       // ---- 1. undo everything the previous result decided ----
       const settled = await tx.prediction.findMany({
         where: { roundId: round.id, outcome: { not: PredictionOutcome.PENDING } },
-        select: { id: true, userId: true, typeId: true, pickedNumber: true, outcome: true, payout: true },
+        select: {
+          id: true, userId: true, typeId: true, pickedNumber: true, outcome: true, payout: true,
+          user: { select: { agentId: true } },
+        },
       });
 
       let payoutsReversed = 0;
@@ -304,6 +307,18 @@ export class ResultsService {
             // The whole point of this path — see the method doc.
             allowNegative: true,
           });
+          // Give the Agent back what it paid for the wrong result.
+          if (p.user.agentId) {
+            await this.ledgerService.applyDelta(tx, {
+              userId: p.user.agentId,
+              delta: p.payout,
+              wallet: LedgerWallet.MAIN,
+              source: LedgerSource.RESULT_CORRECTION,
+              performedById: requester.id,
+              predictionId: p.id,
+              note: `Refunded ${p.typeId} ${p.pickedNumber} payout after result correction`,
+            });
+          }
           payoutsReversed += p.payout;
           touchedUserIds.add(p.userId);
         }
@@ -538,12 +553,12 @@ export class ResultsService {
    * previous side already settled — belt to the submitResult braces above.
    *
    * A winner is paid `stake × oddsMultiplier`, the Player-side rate frozen
-   * at placement. `agentOddsMultiplier` (the admin→agent rate) is recorded
-   * on the row but deliberately unused here: who *funds* the payout is a
-   * later iteration, per the user's "we are not worried about who pays what
-   * not yet". Today the credit is created rather than moved, which is the
-   * one place this system knowingly departs from conservation — flagged in
-   * ARCHITECTURE.md so it isn't mistaken for an accident.
+   * at placement, and the Player's Agent pays it: its wallet is debited the
+   * same amount (2026-11-18, per the user: "when he wins, he'll get back from
+   * the agent account"). Stakes still leave the player and go nowhere, so an
+   * Agent's wallet only drains — its Admin's grants are the only way in.
+   * `agentOddsMultiplier` (the admin→agent rate) remains recorded for the
+   * Admin↔Agent settlement table and is unused here.
    */
   private async settleTypes(
     tx: Tx,
@@ -553,7 +568,10 @@ export class ResultsService {
   ) {
     const pending = await tx.prediction.findMany({
       where: { roundId, typeId: { in: types }, outcome: PredictionOutcome.PENDING },
-      select: { id: true, userId: true, typeId: true, pickedNumber: true, stake: true, oddsMultiplier: true },
+      select: {
+        id: true, userId: true, typeId: true, pickedNumber: true, stake: true, oddsMultiplier: true,
+        user: { select: { agentId: true } },
+      },
     });
 
     let won = 0;
@@ -588,6 +606,21 @@ export class ResultsService {
           predictionId: p.id,
           note: `Won ${p.typeId} on ${p.pickedNumber} at ${p.oddsMultiplier}x`,
         });
+        // The Agent's wallet pays it. allowNegative: settlement must always
+        // complete (a failed settlement would strand the round — results
+        // cannot be re-submitted), so an Agent that cannot cover it goes
+        // negative and owes the difference until its Admin tops it up.
+        if (p.user.agentId) {
+          await this.ledgerService.applyDelta(tx, {
+            userId: p.user.agentId,
+            delta: -payout,
+            wallet: LedgerWallet.MAIN,
+            source: LedgerSource.AGENT_PAYOUT,
+            predictionId: p.id,
+            note: `Paid ${p.typeId} ${p.pickedNumber} winner at ${p.oddsMultiplier}x`,
+            allowNegative: true,
+          });
+        }
         won++;
         paidOut += payout;
       } else {

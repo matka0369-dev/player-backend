@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { assertMayViewPredictionData } from '../rbac/view-guard.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { effectiveTier, resolveScopeOwnerId } from '../rbac/scope.util';
@@ -55,6 +56,7 @@ export class PredictionsService {
   // shape without duplicating it (that one scopes User rows, this scopes
   // Prediction rows one hop further through user.agentId).
   async listForSubtree(requester: AuthenticatedUser) {
+    assertMayViewPredictionData(requester);
     const ownerId = resolveScopeOwnerId(requester);
     let playerFilter: Prisma.UserWhereInput;
 
@@ -103,8 +105,12 @@ export class PredictionsService {
    */
   async aggregate(
     requester: AuthenticatedUser,
-    filters: { gameId?: string; date?: string; agentIds?: string[] },
+    filters: { gameId?: string; date?: string; from?: string; to?: string; agentIds?: string[] },
   ) {
+    assertMayViewPredictionData(requester);
+    for (const [k, v] of Object.entries({ date: filters.date, from: filters.from, to: filters.to })) {
+      if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new BadRequestException(`${k} must be YYYY-MM-DD`);
+    }
     const ownerId = resolveScopeOwnerId(requester);
     const isAgentTier = effectiveTier(requester) === 'AGENT';
     const agentIds = isAgentTier ? [ownerId] : await this.agentIdsOwnedBy(ownerId);
@@ -145,6 +151,8 @@ export class PredictionsService {
       WHERE player.agent_id = ANY(${scopedAgentIds})
         ${filters.gameId ? Prisma.sql`AND g.id = ${filters.gameId}` : Prisma.empty}
         ${filters.date ? Prisma.sql`AND r.date = ${new Date(`${filters.date}T00:00:00.000Z`)}` : Prisma.empty}
+        ${filters.from ? Prisma.sql`AND r.date >= ${new Date(`${filters.from}T00:00:00.000Z`)}` : Prisma.empty}
+        ${filters.to ? Prisma.sql`AND r.date <= ${new Date(`${filters.to}T00:00:00.000Z`)}` : Prisma.empty}
       GROUP BY g.id, g.name, r.date, p.type_id, p.picked_number
       ORDER BY r.date DESC, g.name, p.type_id, SUM(p.stake) DESC
     `;
@@ -161,6 +169,72 @@ export class PredictionsService {
         totalStake: Number(r.totalStake),
         odds: r.odds,
       })),
+    };
+  }
+
+  /**
+   * An Agent's own results, per game and day: what its players staked, what
+   * the Agent paid out to winners, and the difference. `net` is the book's
+   * result for the Agent (stake taken in minus payouts paid) — positive means
+   * its players lost more than they won. Pending bets count towards stake and
+   * bet count but have paid nothing yet.
+   */
+  async agentPnl(
+    requester: AuthenticatedUser,
+    filters: { from?: string; to?: string; gameId?: string },
+  ) {
+    assertMayViewPredictionData(requester);
+    if (effectiveTier(requester) !== 'AGENT') {
+      throw new ForbiddenException('Only an Agent has a profit and loss view');
+    }
+    for (const [k, v] of Object.entries({ from: filters.from, to: filters.to })) {
+      if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new BadRequestException(`${k} must be YYYY-MM-DD`);
+    }
+    const agentId = resolveScopeOwnerId(requester);
+
+    const rows = await this.prisma.$queryRaw<
+      {
+        gameId: string; gameName: string; date: Date;
+        betCount: bigint; wonCount: bigint; pendingCount: bigint; totalStake: bigint; totalPayout: bigint;
+      }[]
+    >`
+      SELECT g.id AS "gameId", g.name AS "gameName", r.date,
+             COUNT(p.id) AS "betCount",
+             COUNT(p.id) FILTER (WHERE p.outcome = 'WON') AS "wonCount",
+             COUNT(p.id) FILTER (WHERE p.outcome = 'PENDING') AS "pendingCount",
+             COALESCE(SUM(p.stake), 0) AS "totalStake",
+             COALESCE(SUM(p.payout) FILTER (WHERE p.outcome = 'WON'), 0) AS "totalPayout"
+      FROM predictions p
+      JOIN users player ON player.id = p.user_id
+      JOIN rounds r ON r.id = p.round_id
+      JOIN games g ON g.id = r.game_id
+      WHERE player.agent_id = ${agentId}
+        ${filters.gameId ? Prisma.sql`AND g.id = ${filters.gameId}` : Prisma.empty}
+        ${filters.from ? Prisma.sql`AND r.date >= ${new Date(`${filters.from}T00:00:00.000Z`)}` : Prisma.empty}
+        ${filters.to ? Prisma.sql`AND r.date <= ${new Date(`${filters.to}T00:00:00.000Z`)}` : Prisma.empty}
+      GROUP BY g.id, g.name, r.date
+      ORDER BY r.date DESC, g.name
+    `;
+
+    const out = rows.map((r) => ({
+      gameId: r.gameId,
+      gameName: r.gameName,
+      date: r.date.toISOString().slice(0, 10),
+      betCount: Number(r.betCount),
+      wonCount: Number(r.wonCount),
+      pendingCount: Number(r.pendingCount),
+      totalStake: Number(r.totalStake),
+      totalPayout: Number(r.totalPayout),
+      net: Number(r.totalStake) - Number(r.totalPayout),
+    }));
+    const sum = (k: 'betCount' | 'wonCount' | 'pendingCount' | 'totalStake' | 'totalPayout' | 'net') =>
+      out.reduce((a, r) => a + r[k], 0);
+    return {
+      rows: out,
+      totals: {
+        betCount: sum('betCount'), wonCount: sum('wonCount'), pendingCount: sum('pendingCount'),
+        totalStake: sum('totalStake'), totalPayout: sum('totalPayout'), net: sum('net'),
+      },
     };
   }
 
@@ -244,6 +318,7 @@ export class PredictionsService {
     requester: AuthenticatedUser,
     filters: { gameId?: string; date?: string; agentId?: string },
   ) {
+    assertMayViewPredictionData(requester);
     const ownerId = resolveScopeOwnerId(requester);
     const tier = effectiveTier(requester);
     const viewerIsAgent = tier === 'AGENT';

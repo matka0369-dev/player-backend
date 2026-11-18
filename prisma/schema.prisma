@@ -105,6 +105,8 @@ model User {
   whatsappNumber String?         @map("whatsapp_number")
   inviteCode     String?         @unique @map("invite_code")
   contacts       AgentContact[]
+  auditOwned     AuditLog[]     @relation("AuditOwner")
+  auditActed     AuditLog[]     @relation("AuditActor")
 
   roles             UserRole[]
   sessions          Session[]
@@ -273,6 +275,12 @@ enum LedgerSource {
   PREDICTION_STAKE_IN
   PREDICTION_PAYOUT
 
+  // The Agent's side of a winner's payout: the Agent's wallet pays what the
+  // player is credited (2026-11-18). Allowed to take the Agent negative —
+  // settlement must always complete, and a negative balance is what the Agent
+  // owes until its Admin tops it up. Reversed by RESULT_CORRECTION.
+  AGENT_PAYOUT
+
   // Undoing a PREDICTION_PAYOUT because the result it was graded against was
   // wrong. Written as its own compensating row rather than by editing or
   // deleting the original: the ledger is append-only, and "this was paid,
@@ -359,6 +367,12 @@ enum TokenRequestKind {
   // are destroyed (TOKEN_SURRENDER). Admin-tier because it changes total
   // supply, mirroring minting.
   SURRENDER
+  // "I want to give these tokens back to my agent." Resolved by an Agent
+  // employee holding request:approve (2026-11-18): the tokens move from the
+  // Player to the Agent's wallet as an ordinary AGENT_TRANSFER pair. Moves
+  // existing supply, creates and destroys none — and carries no payout
+  // destination or any other detail beyond a free-text note.
+  RETURN
 
   @@map("token_request_kind")
 }
@@ -395,6 +409,10 @@ model TokenRequest {
   requester   User               @relation("TokenRequestRequester", fields: [requesterId], references: [id], onDelete: Cascade)
   kind        TokenRequestKind
   status      TokenRequestStatus @default(PENDING)
+  // Short code shown to the player and carried in their WhatsApp message, so a
+  // pasted message can be matched to this exact row. Not a secret.
+  shortCode String? @unique @map("short_code")
+
   amount      Int
 
   /**
@@ -475,6 +493,29 @@ model AgentContact {
 
   @@unique([agentId, purpose])
   @@map("agent_contacts")
+}
+
+// One row per notable action, naming the account that actually performed it —
+// an Agent's employee, not just the Agent it works for. `ownerId` is the
+// Agent (or Admin) whose subtree the action happened in; that is whose
+// Activity log it appears in.
+model AuditLog {
+  id           String   @id @default(uuid())
+  ownerId      String   @map("owner_id")
+  owner        User     @relation("AuditOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  actorId      String?  @map("actor_id")
+  actor        User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorType    String?  @map("actor_type")
+  action       String
+  targetUserId String?  @map("target_user_id")
+  targetType   String?  @map("target_type")
+  targetId     String?  @map("target_id")
+  meta         Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([ownerId, createdAt])
+  @@index([actorId])
+  @@map("audit_logs")
 }
 
 model LoginToken {

@@ -46,6 +46,8 @@ export class PredictionsController {
     @Req() req: AuthenticatedRequest,
     @Query('gameId') gameId?: string,
     @Query('date') date?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
     // Repeatable (?agentId=a&agentId=b) or comma-separated — Express hands
     // the first form back as an array, so both shapes are normalised here
     // rather than forcing one on the caller.
@@ -54,8 +56,23 @@ export class PredictionsController {
     return this.predictionsService.aggregate(req.user!, {
       gameId,
       date,
+      from,
+      to,
       agentIds: parseIdList(agentId),
     });
+  }
+
+  // An Agent's own results per game and day (stakes in, payouts paid, net).
+  @Get('agent-pnl')
+  @UseGuards(AccountTypesGuard)
+  @RequireAccountTypes('AGENT', 'AGENT_STAFF')
+  agentPnl(
+    @Req() req: AuthenticatedRequest,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('gameId') gameId?: string,
+  ) {
+    return this.predictionsService.agentPnl(req.user!, { from, to, gameId });
   }
 
   /**

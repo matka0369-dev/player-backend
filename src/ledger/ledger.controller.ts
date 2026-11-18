@@ -10,6 +10,11 @@ import { TransferTokensDto } from './dto/transfer-tokens.dto';
 export class LedgerController {
   constructor(private readonly ledgerService: LedgerService) {}
 
+  @Get('wallet')
+  wallet(@Req() req: AuthenticatedRequest) {
+    return this.ledgerService.agentWallet(req.user!);
+  }
+
   // Scoped inside the service — an Admin sees its subtree, an Agent its
   // Players, a Player only itself.
   @Get()

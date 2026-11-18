@@ -1,4 +1,4 @@
-import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsOptional, IsString, Matches } from 'class-validator';
 
 // Loose on formatting (people type spaces and dashes) — the service strips to
 // digits and enforces the real rule, a country code plus subscriber number.
@@ -15,19 +15,4 @@ export class SetContactsDto {
   @IsString()
   @Matches(PHONE_INPUT_RE, { message: 'tokens must be a phone number with country code' })
   tokens?: string | null;
-}
-
-export class InvitePlayerDto {
-  @IsString()
-  @Matches(PHONE_INPUT_RE, { message: 'phone must be a phone number with country code' })
-  phone!: string;
-
-  // Players never type this — it only has to be unique and readable in the
-  // Agent's own table — so it's optional and derived from the phone number.
-  @IsOptional()
-  @IsString()
-  @MinLength(3)
-  @MaxLength(30)
-  @Matches(/^[A-Za-z0-9_.-]+$/, { message: 'username may only use letters, digits, _ . -' })
-  username?: string;
 }

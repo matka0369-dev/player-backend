@@ -18,16 +18,25 @@ export const PERMISSIONS = {
   // permission in this system hands staff token authority. The split is
   // enforced in TokenRequestsService.approve, not by this key's absence.
   REQUEST_MANAGE: 'request:manage',
+  // Agent-side duties that used to belong to the owner Agent directly. They
+  // are staff permissions now (2026-11-18) so every one of these actions is
+  // tied to a named employee in the audit log: creating players, moving the
+  // Agent's tokens, approving token requests, and reading prediction data.
+  PLAYER_CREATE: 'player:create',
+  TOKEN_TRANSFER: 'token:transfer',
+  REQUEST_APPROVE: 'request:approve',
+  PREDICTION_VIEW: 'prediction:view',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
 export const ALL_PERMISSIONS: PermissionKey[] = Object.values(PERMISSIONS);
 
-// Roles grantable to an Agent's own staff (AGENT_STAFF). Agent-side
-// delegation is deliberately narrow: staff never get account-creation or
-// token authority, only the day-to-day moderation duty an Agent already
-// has — see ARCHITECTURE.md "Hard safety boundaries". Shared by
+// Roles grantable to an Agent's own staff (AGENT_STAFF). Since 2026-11-18 an
+// Agent's employees do the Agent's day-to-day work — creating players, moving
+// the Agent's own tokens, approving requests — and the owner account does not,
+// so each action is attributable to a person. Staff can never mint tokens
+// (token:administer stays Admin-tier). Shared by
 // UsersService (creation-time roleIds) and RolesService (post-creation
 // assign/unassign) so the two can't drift apart.
 export const AGENT_STAFF_ALLOWED_PERMISSIONS = new Set<PermissionKey>([
@@ -40,6 +49,10 @@ export const AGENT_STAFF_ALLOWED_PERMISSIONS = new Set<PermissionKey>([
   // Triage only. Safe to delegate precisely because it stops short of
   // approval — rejecting a request moves nothing.
   PERMISSIONS.REQUEST_MANAGE,
+  PERMISSIONS.PLAYER_CREATE,
+  PERMISSIONS.TOKEN_TRANSFER,
+  PERMISSIONS.REQUEST_APPROVE,
+  PERMISSIONS.PREDICTION_VIEW,
 ]);
 
 // Roles grantable to an ADMIN (by Platform Admin) or an ADMIN_STAFF (by its
