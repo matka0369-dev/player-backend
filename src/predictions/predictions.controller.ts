@@ -52,6 +52,8 @@ export class PredictionsController {
     // the first form back as an array, so both shapes are normalised here
     // rather than forcing one on the caller.
     @Query('agentId') agentId?: string | string[],
+    // One player's bets (an Agent looking at a player of its own).
+    @Query('playerId') playerId?: string,
   ) {
     return this.predictionsService.aggregate(req.user!, {
       gameId,
@@ -59,6 +61,7 @@ export class PredictionsController {
       from,
       to,
       agentIds: parseIdList(agentId),
+      playerId: playerId || undefined,
     });
   }
 

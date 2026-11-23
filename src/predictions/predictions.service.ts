@@ -105,7 +105,7 @@ export class PredictionsService {
    */
   async aggregate(
     requester: AuthenticatedUser,
-    filters: { gameId?: string; date?: string; from?: string; to?: string; agentIds?: string[] },
+    filters: { gameId?: string; date?: string; from?: string; to?: string; agentIds?: string[]; playerId?: string },
   ) {
     assertMayViewPredictionData(requester);
     for (const [k, v] of Object.entries({ date: filters.date, from: filters.from, to: filters.to })) {
@@ -149,6 +149,9 @@ export class PredictionsService {
       JOIN rounds r ON r.id = p.round_id
       JOIN games g ON g.id = r.game_id
       WHERE player.agent_id = ANY(${scopedAgentIds})
+        -- One player's bets. The agent scope above still applies, so a player
+        -- outside the caller's subtree matches nothing (an empty book, not an error).
+        ${filters.playerId ? Prisma.sql`AND p.user_id = ${filters.playerId}` : Prisma.empty}
         ${filters.gameId ? Prisma.sql`AND g.id = ${filters.gameId}` : Prisma.empty}
         ${filters.date ? Prisma.sql`AND r.date = ${new Date(`${filters.date}T00:00:00.000Z`)}` : Prisma.empty}
         ${filters.from ? Prisma.sql`AND r.date >= ${new Date(`${filters.from}T00:00:00.000Z`)}` : Prisma.empty}
