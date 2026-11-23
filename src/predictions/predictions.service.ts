@@ -4,6 +4,7 @@ import { assertMayViewPredictionData } from '../rbac/view-guard.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { effectiveTier, resolveScopeOwnerId } from '../rbac/scope.util';
+import { splitByShare } from '../games/settlement-math';
 
 const predictionSelect = {
   id: true,
@@ -365,6 +366,7 @@ export class PredictionsService {
         totalStaked: true,
         totalPayout: true,
         net: true,
+        agentShare: true,
         game: { select: { id: true, name: true } },
         agent: { select: { id: true, username: true } },
         admin: { select: { id: true, username: true } },
@@ -380,30 +382,45 @@ export class PredictionsService {
     return {
       viewerIsAgent,
       date: date.toISOString().slice(0, 10),
-      rows: rows.map((r) => ({
-        id: r.id,
-        date: r.date.toISOString().slice(0, 10),
-        gameId: r.game.id,
-        gameName: r.game.name,
-        agentId: r.agent.id,
-        agentUsername: r.agent.username,
-        adminId: r.admin.id,
-        adminUsername: r.admin.username,
-        openPana: r.openPana,
-        closePana: r.closePana,
-        // Flipped as a unit so the three always agree with each other.
-        totalStaked: r.totalStaked * sign,
-        totalPayout: r.totalPayout * sign,
-        net: r.net * sign,
-        lines: r.lines.map((l) => ({
-          typeId: l.typeId,
-          pickedNumber: l.pickedNumber,
-          stake: l.stake,
-          agentOdds: l.agentOdds,
-          // The payout keeps its own sign flip: it's money owed one way.
-          payout: l.payout * sign,
-        })),
-      })),
+      rows: rows.map((r) => {
+        const { adminSlice, agentSlice } = splitByShare(r.net, r.agentShare);
+        return {
+          id: r.id,
+          date: r.date.toISOString().slice(0, 10),
+          gameId: r.game.id,
+          gameName: r.game.name,
+          agentId: r.agent.id,
+          agentUsername: r.agent.username,
+          adminId: r.admin.id,
+          adminUsername: r.admin.username,
+          openPana: r.openPana,
+          closePana: r.closePana,
+          // Flipped as a unit so the three always agree with each other.
+          totalStaked: r.totalStaked * sign,
+          totalPayout: r.totalPayout * sign,
+          net: r.net * sign,
+          // Profit and loss are shared: `net` above is the whole position at the
+          // rate between the two tiers, and these say how it is carried.
+          //   agentShare — the Agent's slice in tenths (0 = the Admin carries it
+          //                all, as on rows from before shares were applied)
+          //   transfer   — what actually changes hands between the two, oriented
+          //                to the caller (the Admin pays on a loss: negative; the
+          //                Agent receives: positive)
+          //   yourResult — the caller's own slice of the day. A loss is negative
+          //                for both tiers, which is the point of sharing it.
+          agentShare: r.agentShare,
+          transfer: adminSlice * sign,
+          yourResult: viewerIsAgent ? agentSlice : adminSlice,
+          lines: r.lines.map((l) => ({
+            typeId: l.typeId,
+            pickedNumber: l.pickedNumber,
+            stake: l.stake,
+            agentOdds: l.agentOdds,
+            // The payout keeps its own sign flip: it's money owed one way.
+            payout: l.payout * sign,
+          })),
+        };
+      }),
     };
   }
 
