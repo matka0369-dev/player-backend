@@ -12,6 +12,7 @@ import {
   derive,
   isValidPana,
   isWinner,
+  singleFromPana,
 } from './result-derivation';
 import { GradedPrediction, computeSettlement } from './settlement-math';
 
@@ -408,6 +409,30 @@ export class ResultsService {
         agentsSettled,
       };
     });
+  }
+
+  /**
+   * Declared results for one day, every game that has a round that day. Read-only
+   * and tier-agnostic: a result is public once declared (players see it in their
+   * history), so this only filters by date and, optionally, game. The "single"
+   * (ank) is derived the same way settlement derives it.
+   */
+  async resultsForDate(date: string, gameId?: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new BadRequestException('date must be YYYY-MM-DD');
+    const rounds = await this.prisma.round.findMany({
+      where: { date: new Date(date), ...(gameId ? { gameId } : {}) },
+      select: { openPana: true, closePana: true, game: { select: { id: true, name: true } } },
+      orderBy: { game: { name: 'asc' } },
+    });
+    return rounds.map((r) => ({
+      gameId: r.game.id,
+      gameName: r.game.name,
+      date,
+      openPana: r.openPana,
+      closePana: r.closePana,
+      openSingle: r.openPana ? singleFromPana(r.openPana) : null,
+      closeSingle: r.closePana ? singleFromPana(r.closePana) : null,
+    }));
   }
 
   /** Correction history for a game, newest first. */

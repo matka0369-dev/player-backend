@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { SessionAuthGuard } from '../auth/guards/session-auth.guard';
 import { AccountTypesGuard } from '../rbac/account-types.guard';
 import { RequireAccountTypes } from '../rbac/account-types.decorator';
@@ -25,6 +25,15 @@ export class GamesController {
   @RequireAccountTypes('PLATFORM_ADMIN', 'ADMIN', 'ADMIN_STAFF')
   list(@Req() req: AuthenticatedRequest) {
     return this.gamesService.list(req.user!);
+  }
+
+  // Declared results for a day (Open/Close pana and their singles). Declared
+  // results are public to every signed-in tier above Player, so no per-tier scope.
+  @Get('results')
+  @UseGuards(AccountTypesGuard)
+  @RequireAccountTypes('PLATFORM_ADMIN', 'ADMIN', 'ADMIN_STAFF', 'AGENT', 'AGENT_STAFF')
+  results(@Query('date') date: string, @Query('gameId') gameId?: string) {
+    return this.resultsService.resultsForDate(date, gameId || undefined);
   }
 
   @Post()
