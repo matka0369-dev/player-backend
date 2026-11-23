@@ -159,6 +159,14 @@ describe('splitByShare: a win is a loss for both tiers', () => {
     expect(splitByShare(-1990, 1)).toEqual({ adminSlice: -1791, agentSlice: -199 });
   });
 
+  it('is the 20% cut example: a 100 bet that wins at 9x costs the Admin 80 x 9', () => {
+    // whole position: 100 staked, 900 owed at the rate between the two tiers
+    const net = 100 - 100 * 9;
+    expect(splitByShare(net, 2)).toEqual({ adminSlice: -640, agentSlice: -160 });
+    // the Admin: keeps 80 of the stake and pays 80 x 9 = 720, so -640
+    expect(80 - 80 * 9).toBe(-640);
+  });
+
   it('shares a profit the same way', () => {
     expect(splitByShare(1000, 1)).toEqual({ adminSlice: 900, agentSlice: 100 });
   });
