@@ -1,5 +1,5 @@
 import { PredictionOutcome as O, PredictionType as T } from '@prisma/client';
-import { GradedPrediction, computeSettlement, splitByShare } from './settlement-math';
+import { GradedPrediction, computeSettlement } from './settlement-math';
 
 /**
  * The arithmetic that decides who owes whom between an Admin and an Agent.
@@ -150,48 +150,5 @@ describe('computeSettlement — idempotence across the two-pass settle', () => {
     expect(afterClose.totalStaked).toBe(120);
     expect(afterClose.totalPayout).toBe(1600);
     expect(afterClose.net).toBe(-1480);
-  });
-});
-
-describe('splitByShare: a win is a loss for both tiers', () => {
-  it('with the default 9:1 split, the Agent bears a tenth of a loss and the Admin the rest', () => {
-    // players won 1 990 more than was staked: net -1 990 from the Admin's side
-    expect(splitByShare(-1990, 1)).toEqual({ adminSlice: -1791, agentSlice: -199 });
-  });
-
-  it('is the 20% cut example: a 100 bet that wins at 9x costs the Admin 80 x 9', () => {
-    // whole position: 100 staked, 900 owed at the rate between the two tiers
-    const net = 100 - 100 * 9;
-    expect(splitByShare(net, 2)).toEqual({ adminSlice: -640, agentSlice: -160 });
-    // the Admin: keeps 80 of the stake and pays 80 x 9 = 720, so -640
-    expect(80 - 80 * 9).toBe(-640);
-  });
-
-  it('shares a profit the same way', () => {
-    expect(splitByShare(1000, 1)).toEqual({ adminSlice: 900, agentSlice: 100 });
-  });
-
-  it('gives the old behaviour at a share of 0: the Admin carries everything', () => {
-    expect(splitByShare(-1990, 0)).toEqual({ adminSlice: -1990, agentSlice: 0 });
-  });
-
-  it('always adds back up to the whole position, whatever the rounding', () => {
-    for (const net of [-1999, -1001, -5, -1, 0, 1, 5, 1001, 1999]) {
-      for (let share = 0; share <= 10; share++) {
-        const { adminSlice, agentSlice } = splitByShare(net, share);
-        expect(adminSlice + agentSlice).toBe(net);
-      }
-    }
-  });
-
-  it('rounds half away from zero, the same for a loss as for a profit', () => {
-    expect(splitByShare(5, 1)).toEqual({ adminSlice: 5, agentSlice: 0 }); // 4.5 -> 5
-    expect(splitByShare(-5, 1)).toEqual({ adminSlice: -5, agentSlice: 0 }); // -4.5 -> -5
-  });
-
-  it('clamps a share outside 0..10 and ignores junk', () => {
-    expect(splitByShare(100, 25)).toEqual({ adminSlice: 0, agentSlice: 100 });
-    expect(splitByShare(100, -3)).toEqual({ adminSlice: 100, agentSlice: 0 });
-    expect(splitByShare(100, Number.NaN)).toEqual({ adminSlice: 100, agentSlice: 0 });
   });
 });

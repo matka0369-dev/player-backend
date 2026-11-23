@@ -881,11 +881,6 @@ model Settlement {
   // exactly -net.
   net         Int
 
-  // The Agent's slice of this position, in tenths, frozen when the row was first
-  // written (1 = a 9:1 Admin:Agent split). 0 on rows from before shares were
-  // applied, which keeps their old meaning: the Admin carried all of `net`.
-  agentShare Int @default(0) @map("agent_share")
-
   lines SettlementLine[]
 
   createdAt DateTime @default(now()) @map("created_at")

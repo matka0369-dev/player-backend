@@ -511,10 +511,9 @@ export class ResultsService {
     // Each Agent settles against the Admin that created it.
     const agents = await tx.user.findMany({
       where: { id: { in: [...byAgent.keys()] } },
-      select: { id: true, createdById: true, agentShare: true },
+      select: { id: true, createdById: true },
     });
     const adminOf = new Map(agents.map((a) => [a.id, a.createdById]));
-    const shareOf = new Map(agents.map((a) => [a.id, a.agentShare ?? 0]));
 
     let written = 0;
     for (const [agentId, predictions] of byAgent) {
@@ -548,9 +547,6 @@ export class ResultsService {
           totalStaked: draft.totalStaked,
           totalPayout: draft.totalPayout,
           net: draft.net,
-          // Frozen here and left alone on update: the second pass of a game
-          // (open, then close) must not re-price a day under a new share.
-          agentShare: shareOf.get(agentId) ?? 0,
         },
         update: {
           openPana: ctx.openPana,

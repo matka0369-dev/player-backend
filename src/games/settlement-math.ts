@@ -102,24 +102,3 @@ export function computeSettlement(predictions: GradedPrediction[]): SettlementDr
 
   return { totalStaked, totalPayout, net: totalStaked - totalPayout, lines };
 }
-
-/**
- * Splits a day's position between the two tiers by the Agent's share.
- *
- * `net` is stake minus payout at the rate between Admin and Agent, from the
- * Admin's side: negative when players won. Profit and loss are shared, so a win
- * is a loss for both: the Agent bears `agentShare` tenths of it and the Admin
- * the rest. The Admin's slice is also what changes hands between them (the
- * Agent's wallet has already paid the winners), so on a win the Admin
- * reimburses the Agent only for its own slice.
- *
- * Rounding is half away from zero and the Agent's slice is the remainder, so the
- * two slices always add back up to `net` exactly. A share outside 0..10 is
- * clamped; 0 gives the old behaviour (the Admin carries everything).
- */
-export function splitByShare(net: number, agentShare: number): { adminSlice: number; agentSlice: number } {
-  const s = Math.min(Math.max(Math.trunc(agentShare) || 0, 0), 10);
-  const raw = (net * (10 - s)) / 10;
-  const adminSlice = Math.sign(raw) * Math.round(Math.abs(raw));
-  return { adminSlice, agentSlice: net - adminSlice };
-}
