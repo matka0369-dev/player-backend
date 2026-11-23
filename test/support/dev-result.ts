@@ -13,5 +13,5 @@ import { makePlayer, makeTeam } from './world';
   const bets = [['JODI','05',50],['JODI','12',40],['JODI','13',30],['JODI','19',20],['JODI','47',60],['JODI','63',80],['OPEN_SINGLE','1',100],['OPEN_SINGLE','5',50],['OPEN_SINGLE_PANA','128',30]] as const;
   await seedBets(game, bets.map(([typeId, picked, stake]) => ({ userId: p.id, typeId, picked, stake, odds: 9 })));
   await t.pa.ok('POST', `/games/${game.id}/result`, { date: istDate(0), openPana: '128' });
-  console.log(JSON.stringify({ admin: t.admin.username, game: game.id }));
+  console.log(JSON.stringify({ admin: t.admin.username, agent: t.agent.username, game: game.id }));
 })();
